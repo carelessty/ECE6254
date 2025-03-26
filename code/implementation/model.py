@@ -189,17 +189,141 @@ class PrivacyRiskClassifier:
         
         return trainer.state.log_history
     
-    def _train_generative(self, train_dataloader, val_dataloader, output_dir, num_epochs):
-        """Custom training loop for generative models using prompt-based approach."""
-        # Implementation of custom training loop for generative models
-        # This would involve creating prompts, processing model outputs, etc.
-        # For now, we'll use a placeholder implementation
+    def _train_generative(self, train_dataloader, val_dataloader, output_dir, num_epochs=3):
+        """
+        Custom training loop for generative models using a prompt-based approach,
+        aligned with the data structure from SelfDisclosureDataset.
         
+        We assume:
+        - train_dataloader/val_dataloader yield batches with 'input_ids', 'attention_mask', and 'labels'.
+        - 'labels' is 0 or 1 (binary classification), which we map to 'No' or 'Yes'.
+        """
         print("Training generative model with prompt-based approach...")
-        
-        # TODO: Implement custom training loop for generative models
-        
-        return {"message": "Generative model training not fully implemented yet"}
+
+        # Basic label-to-text mapping for demonstration
+        label2text = {0: "No", 1: "Yes"}
+
+        # Put the model in training mode
+        self.model.train()
+
+        # Example optimizer (modify hyperparameters or add a scheduler as needed)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=5e-5)
+
+        for epoch in range(num_epochs):
+            self.model.train()
+            total_train_loss = 0.0
+
+            # ------------------
+            # TRAINING LOOP
+            # ------------------
+            for step, batch in enumerate(train_dataloader):
+                # Move batch to the correct device
+                batch_input_ids = batch["input_ids"].to(self.device)
+                batch_attention_mask = batch["attention_mask"].to(self.device)
+                batch_labels = batch["labels"].to(self.device)
+
+                # We'll accumulate the loss over each item in the batch
+                batch_loss = 0.0
+
+                # ----------------------------------------------------------------
+                # For prompt-based teacher forcing, we decode each example, append
+                # the textual label (Yes/No), and re-tokenize. This is illustrative
+                # but not the most efficient for large batches.
+                # ----------------------------------------------------------------
+                for i in range(len(batch_input_ids)):
+                    # 1) Decode the tokens back into text
+                    #    (skip special tokens to keep it cleaner)
+                    decoded_text = self.tokenizer.decode(
+                        batch_input_ids[i],
+                        skip_special_tokens=True
+                    ).strip()
+
+                    # 2) Convert numeric label to text label
+                    label_text = label2text[batch_labels[i].item()]
+
+                    # 3) Create the prompt. Example:
+                    #    "Text: <decoded_text>\nDoes this text contain self-disclosure? Answer: Yes/No"
+                    # You can refine the prompt as needed.
+                    prompt = (
+                        "Determine if the following text contains self-disclosure. "
+                        "Answer with Yes or No.\n\n"
+                        f"Text: {decoded_text}\nAnswer:"
+                    )
+
+                    # 4) Combine the prompt + label for teacher forcing
+                    #    e.g.  "...Answer: Yes"
+                    full_sequence = prompt + " " + label_text
+
+                    # 5) Re-tokenize
+                    inputs = self.tokenizer(full_sequence, return_tensors="pt").to(self.device)
+                    labels_tensors = inputs["input_ids"].clone()
+
+                    # 6) Forward pass with teacher forcing
+                    outputs = self.model(**inputs, labels=labels_tensors)
+                    loss = outputs.loss
+                    batch_loss += loss.item()
+
+                    # 7) Backprop
+                    loss.backward()
+
+                # 8) Optimizer step
+                optimizer.step()
+                optimizer.zero_grad()
+
+                total_train_loss += batch_loss
+
+            avg_train_loss = total_train_loss / len(train_dataloader)
+
+            # ------------------
+            # VALIDATION LOOP
+            # ------------------
+            self.model.eval()
+            total_val_loss = 0.0
+
+            with torch.no_grad():
+                for step, batch in enumerate(val_dataloader):
+                    batch_input_ids = batch["input_ids"].to(self.device)
+                    batch_attention_mask = batch["attention_mask"].to(self.device)
+                    batch_labels = batch["labels"].to(self.device)
+
+                    for i in range(len(batch_input_ids)):
+                        decoded_text = self.tokenizer.decode(
+                            batch_input_ids[i],
+                            skip_special_tokens=True
+                        ).strip()
+
+                        label_text = label2text[batch_labels[i].item()]
+
+                        prompt = (
+                            "Determine if the following text contains self-disclosure. "
+                            "Answer with Yes or No.\n\n"
+                            f"Text: {decoded_text}\nAnswer:"
+                        )
+                        full_sequence = prompt + " " + label_text
+
+                        inputs = self.tokenizer(full_sequence, return_tensors="pt").to(self.device)
+                        labels_tensors = inputs["input_ids"].clone()
+
+                        outputs = self.model(**inputs, labels=labels_tensors)
+                        total_val_loss += outputs.loss.item()
+
+            avg_val_loss = total_val_loss / len(val_dataloader)
+
+            # Print or log the epoch stats
+            print(f"Epoch {epoch + 1}/{num_epochs}")
+            print(f"  Train Loss: {avg_train_loss:.4f}")
+            print(f"  Val   Loss: {avg_val_loss:.4f}")
+
+        # Optionally save the model at the end
+        self.model.save_pretrained(output_dir)
+        self.tokenizer.save_pretrained(output_dir)
+
+        return {
+            "message": "Generative model training completed",
+            "final_train_loss": avg_train_loss,
+            "final_val_loss": avg_val_loss
+        }
+
     
     def predict(self, texts):
         """
