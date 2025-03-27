@@ -232,8 +232,16 @@ class PrivacyRiskEvaluator:
             report += "**Confusion Matrix:**\n\n"
             cm = metrics["confusion_matrix"]
             report += "```\n"
-            report += f"[[{cm[0][0]}, {cm[0][1]}],\n"
-            report += f" [{cm[1][0]}, {cm[1][1]}]]\n"
+            # Check if confusion matrix has the expected structure
+            if len(cm) >= 2 and all(len(row) >= 2 for row in cm[:2]):
+                report += f"[[{cm[0][0]}, {cm[0][1]}],\n"
+                report += f" [{cm[1][0]}, {cm[1][1]}]]\n"
+            elif len(cm) >= 1 and len(cm[0]) >= 1:
+                # Handle 1x1 confusion matrix
+                report += f"[[{cm[0][0]}]]\n"
+            else:
+                # Handle empty confusion matrix
+                report += "Empty confusion matrix\n"
             report += "```\n\n"
             
             # Classification Report
@@ -244,14 +252,21 @@ class PrivacyRiskEvaluator:
             # Format classification report
             report += f"              precision    recall  f1-score   support\n\n"
             
+            # Check for labels in classification report
             for label in ["0", "1"]:
                 if label in cr:
                     label_metrics = cr[label]
                     report += f"           {label}   {label_metrics['precision']:.4f}    {label_metrics['recall']:.4f}    {label_metrics['f1-score']:.4f}   {label_metrics['support']}\n"
             
-            report += f"\n    accuracy                          {cr['accuracy']:.4f}   {cr['macro avg']['support']}\n"
-            report += f"   macro avg   {cr['macro avg']['precision']:.4f}    {cr['macro avg']['recall']:.4f}    {cr['macro avg']['f1-score']:.4f}   {cr['macro avg']['support']}\n"
-            report += f"weighted avg   {cr['weighted avg']['precision']:.4f}    {cr['weighted avg']['recall']:.4f}    {cr['weighted avg']['f1-score']:.4f}   {cr['weighted avg']['support']}\n"
+            # Check if required keys exist in the classification report
+            if 'accuracy' in cr and 'macro avg' in cr and 'weighted avg' in cr:
+                # Ensure 'support' exists in macro avg
+                macro_support = cr['macro avg'].get('support', 0)
+                report += f"\n    accuracy                          {cr['accuracy']:.4f}   {macro_support}\n"
+                report += f"   macro avg   {cr['macro avg']['precision']:.4f}    {cr['macro avg']['recall']:.4f}    {cr['macro avg']['f1-score']:.4f}   {macro_support}\n"
+                report += f"weighted avg   {cr['weighted avg']['precision']:.4f}    {cr['weighted avg']['recall']:.4f}    {cr['weighted avg']['f1-score']:.4f}   {cr['weighted avg'].get('support', 0)}\n"
+            else:
+                report += "\nDetailed metrics not available\n"
             
             report += "```\n\n"
         

@@ -1,0 +1,67 @@
+{
+  "DeepSeek-R1-Distill-Qwen-1.5B (few-shot)": {
+    "accuracy": NaN,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0,
+    "confusion_matrix": [],
+    "classification_report": {
+      "accuracy": 0.0,
+      "macro avg": {
+        "precision": NaN,
+        "recall": NaN,
+        "f1-score": NaN,
+        "support": 0.0
+      },
+      "weighted avg": {
+        "precision": NaN,
+        "recall": NaN,
+        "f1-score": NaN,
+        "support": 0.0
+      }
+    }
+  },
+  "RoBERTa-large-self-disclosure (reference)": {
+    "accuracy": 0.5,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0,
+    "confusion_matrix": [
+      [
+        1,
+        1
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "classification_report": {
+      "0": {
+        "precision": 1.0,
+        "recall": 0.5,
+        "f1-score": 0.6666666666666666,
+        "support": 2.0
+      },
+      "1": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 0.0
+      },
+      "accuracy": 0.5,
+      "macro avg": {
+        "precision": 0.5,
+        "recall": 0.25,
+        "f1-score": 0.3333333333333333,
+        "support": 2.0
+      },
+      "weighted avg": {
+        "precision": 1.0,
+        "recall": 0.5,
+        "f1-score": 0.6666666666666666,
+        "support": 2.0
+      }
+    }
+  }
+}
