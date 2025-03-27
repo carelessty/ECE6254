@@ -2,6 +2,12 @@
 Validation script for the privacy risk detection implementation.
 This script validates the correctness of the implementation and ensures reproducibility.
 """
+import sys
+import os
+
+current_file_path = os.path.abspath(__file__)
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file_path)))
+sys.path.insert(0, project_root)
 
 import os
 import sys
@@ -11,15 +17,15 @@ import torch
 from transformers import AutoTokenizer
 
 # Add the implementation directory to the path
-sys.path.append('/home/ubuntu/privacy_risk_detection/code/implementation')
-sys.path.append('/home/ubuntu/privacy_risk_detection/code/evaluation')
+sys.path.append('./privacy_risk_detection/code/implementation')
+sys.path.append('./privacy_risk_detection/code/evaluation')
 
 # Import the modules to validate
 import implementation.data_utils
 import implementation.model
-from evaluation.evaluator import PrivacyRiskEvaluator, load_reference_model
-from evaluation.config import EXPERIMENTS
-import evaluation.sample_analysis
+from src.evaluation.evaluator import PrivacyRiskEvaluator, load_reference_model
+from src.evaluation.config import EXPERIMENTS
+import src.evaluation.sample_analysis
 
 def validate_imports():
     """Validate that all necessary modules can be imported."""
@@ -223,7 +229,7 @@ def validate_sample_analysis():
     all_exist = True
     
     for func_name in required_functions:
-        if hasattr(evaluation.sample_analysis, func_name) and callable(getattr(evaluation.sample_analysis, func_name)):
+        if hasattr(src.evaluation.sample_analysis, func_name) and callable(getattr(src.evaluation.sample_analysis, func_name)):
             print(f"✓ {func_name} function exists in sample_analysis module")
         else:
             print(f"✗ {func_name} function does not exist in sample_analysis module")
@@ -289,7 +295,7 @@ def run_sample_test():
         os.makedirs(output_dir, exist_ok=True)
         
         # Run sample analysis
-        comparison = evaluation.sample_analysis.run_sample_analysis()
+        comparison = src.evaluation.sample_analysis.run_sample_analysis()
         
         # Check if comparison results are returned
         if comparison and isinstance(comparison, dict) and len(comparison) > 0:

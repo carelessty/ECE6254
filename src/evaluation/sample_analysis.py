@@ -3,6 +3,14 @@ Script to run a sample comparative analysis between DeepSeek-R1-Distill-Qwen-1.5
 and the reference model using mock data for demonstration purposes.
 """
 
+import sys
+import os
+
+current_file_path = os.path.abspath(__file__)
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file_path)))
+sys.path.insert(0, project_root)
+
+
 import os
 import json
 import torch
@@ -11,8 +19,8 @@ import matplotlib.pyplot as plt
 from transformers import AutoTokenizer, set_seed
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-from implementation.data_utils import create_mock_dataloaders
-from implementation.model import FewShotPrivacyRiskClassifier
+from src.implementation.data_utils import create_mock_dataloaders
+from src.implementation.model import FewShotPrivacyRiskClassifier
 from evaluator import load_reference_model, PrivacyRiskEvaluator
 
 def run_sample_analysis():

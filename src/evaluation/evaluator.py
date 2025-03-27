@@ -3,6 +3,12 @@ Evaluation framework for comparing privacy risk detection models.
 This module implements metrics and evaluation procedures for comparing
 DeepSeek-R1-Distill-Qwen-1.5B with the reference model.
 """
+import sys
+import os
+
+current_file_path = os.path.abspath(__file__)
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file_path)))
+sys.path.insert(0, project_root)
 
 import os
 import json
@@ -19,8 +25,8 @@ import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from tqdm import tqdm
 
-from implementation.data_utils import load_self_disclosure_dataset
-from implementation.model import PrivacyRiskClassifier, FewShotPrivacyRiskClassifier
+from src.implementation.data_utils import load_self_disclosure_dataset
+from src.implementation.model import PrivacyRiskClassifier, FewShotPrivacyRiskClassifier
 
 class PrivacyRiskEvaluator:
     """

@@ -2,6 +2,12 @@
 Script to run the full comparative analysis between DeepSeek-R1-Distill-Qwen-1.5B
 and the reference model for privacy risk detection.
 """
+import sys
+import os
+
+current_file_path = os.path.abspath(__file__)
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file_path)))
+sys.path.insert(0, project_root)
 
 import os
 import argparse
@@ -10,8 +16,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from transformers import AutoTokenizer, set_seed
 
-from implementation.data_utils import load_self_disclosure_dataset
-from implementation.model import PrivacyRiskClassifier, FewShotPrivacyRiskClassifier
+from src.implementation.data_utils import load_self_disclosure_dataset
+from src.implementation.model import PrivacyRiskClassifier, FewShotPrivacyRiskClassifier
 from evaluator import PrivacyRiskEvaluator, load_reference_model
 from config import EXPERIMENTS
 

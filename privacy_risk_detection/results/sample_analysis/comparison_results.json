@@ -1,0 +1,14 @@
+{
+  "DeepSeek-R1-Distill-Qwen-1.5B (few-shot)": {
+    "accuracy": 0.5,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0
+  },
+  "RoBERTa-large-self-disclosure (reference)": {
+    "accuracy": 0.5,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0
+  }
+}
