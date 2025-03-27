@@ -18,8 +18,8 @@ from transformers import AutoTokenizer, set_seed
 
 from src.implementation.data_utils import load_self_disclosure_dataset
 from src.implementation.model import PrivacyRiskClassifier, FewShotPrivacyRiskClassifier
-from evaluator import PrivacyRiskEvaluator, load_reference_model
-from config import EXPERIMENTS
+from src.evaluation.evaluator import PrivacyRiskEvaluator, load_reference_model
+from src.evaluation.config import EXPERIMENTS
 
 def parse_args():
     """Parse command line arguments."""
@@ -83,7 +83,7 @@ def run_comparative_analysis(args):
     # Load dataset
     print("Loading dataset...")
     if args.use_mock_data:
-        from implementation.data_utils import create_mock_dataloaders
+        from src.implementation.data_utils import create_mock_dataloaders
         _, _, test_dataloader = create_mock_dataloaders(
             tokenizer, batch_size=experiment['batch_size'], task=experiment['task']
         )

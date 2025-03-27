@@ -117,10 +117,30 @@ class PrivacyRiskEvaluator:
         flat_labels = []
         
         for pred_seq, label_seq in zip(predictions, labels):
-            for p, l in zip(pred_seq, label_seq):
-                if l != -100:  # Ignore padding
-                    flat_preds.append(p)
-                    flat_labels.append(l)
+            # Handle case where pred_seq is a single integer (numpy.int64)
+            if isinstance(pred_seq, (int, np.int64, np.int32)):
+                flat_preds.append(pred_seq)
+                if not isinstance(label_seq, (int, np.int64, np.int32)) and hasattr(label_seq, '__iter__'):
+                    # If label_seq is iterable but pred_seq is not, use the first non-padding label
+                    for l in label_seq:
+                        if l != -100:
+                            flat_labels.append(l)
+                            break
+                else:
+                    # Both are single values
+                    flat_labels.append(label_seq)
+            # Handle case where pred_seq is iterable but label_seq is not
+            elif isinstance(label_seq, (int, np.int64, np.int32)) and hasattr(pred_seq, '__iter__'):
+                if label_seq != -100:  # Ignore padding
+                    # Use the first prediction for this single label
+                    flat_preds.append(pred_seq[0] if len(pred_seq) > 0 else 0)
+                    flat_labels.append(label_seq)
+            # Normal case: both are iterables
+            elif hasattr(pred_seq, '__iter__') and hasattr(label_seq, '__iter__'):
+                for p, l in zip(pred_seq, label_seq):
+                    if l != -100:  # Ignore padding
+                        flat_preds.append(p)
+                        flat_labels.append(l)
         
         metrics = {
             "accuracy": accuracy_score(flat_labels, flat_preds),

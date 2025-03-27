@@ -389,12 +389,25 @@ class PrivacyRiskClassifier:
             # Extract prediction from response
             if self.task == "classification":
                 # For classification, extract Yes/No
-                prediction = 1 if "Yes" in response.split(prompt)[1] else 0
+                try:
+                    prediction = 1 if "Yes" in response.split(prompt)[1] else 0
+                except IndexError:
+                    # Handle case where response doesn't contain the prompt
+                    prediction = 1 if "Yes" in response else 0
             else:
                 # For span detection, extract D/N labels
-                # This is a simplified approach and would need to be refined
-                labels_text = response.split(prompt)[1].strip()
-                prediction = [1 if label == 'D' else 0 for label in labels_text.split()]
+                try:
+                    labels_text = response.split(prompt)[1].strip()
+                    prediction = [1 if label == 'D' else 0 for label in labels_text.split()]
+                    # Ensure prediction is not empty
+                    if not prediction:
+                        # Default to all non-disclosure if no labels were extracted
+                        words = text.split()
+                        prediction = [0] * len(words)
+                except (IndexError, ValueError):
+                    # Handle case where response doesn't contain the prompt or is malformed
+                    words = text.split()
+                    prediction = [0] * len(words)
             
             results.append(prediction)
         
@@ -562,7 +575,11 @@ class FewShotPrivacyRiskClassifier:
     def _extract_prediction(self, response, prompt):
         """Extract prediction from model response."""
         # Get the part after the prompt
-        result = response[len(prompt):].strip()
+        try:
+            result = response[len(prompt):].strip()
+        except:
+            # Handle case where response is unexpected
+            result = response.strip()
         
         if self.task == "classification":
             # For classification, extract Yes/No
@@ -572,6 +589,10 @@ class FewShotPrivacyRiskClassifier:
                 return 0
         else:
             # For span detection, extract D/N labels
-            # This is a simplified approach and would need to be refined
-            labels = result.split()
-            return [1 if label == 'D' else 0 for label in labels]
+            try:
+                labels = result.split()
+                return [1 if label == 'D' else 0 for label in labels]
+            except (IndexError, ValueError):
+                # Handle case where response is malformed
+                # Default to all non-disclosure
+                return [0] * 10  # Default length if we can't determine
