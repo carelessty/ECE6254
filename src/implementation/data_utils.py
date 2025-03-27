@@ -1,228 +1,305 @@
-"""
-Data preprocessing utilities for privacy risk detection in user-generated content.
-This module handles loading and preprocessing the reddit-self-disclosure dataset.
-"""
-
 import os
 import torch
-from datasets import load_dataset
+from typing import Tuple, Dict, Any, Union
+from datasets import load_dataset, DatasetDict
+from datasets import Dataset
+from datasets.exceptions import DatasetNotFoundError
 from transformers import AutoTokenizer
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset as TorchDataset
+from torch.utils.data import DataLoader, TensorDataset
 
-class SelfDisclosureDataset(Dataset):
+# Field name constants for dataset compatibility
+TEXT_FIELD = "text"
+TAGS_FIELD = "tags"
+LABEL_FIELD = "label"
+SPLIT_NAMES = ("train", "validation", "test")
+
+def parse_text_into_tokens_and_tags(example):
+    """
+    将示例中 'text' 字段按行解析出 tokens 和 tags。
+    假设数据格式：每行的最后一个空格右侧是标签，其余部分是一个 token。
+    
+    如:
+    "New O
+    year/New O
+    me! O
+    I've B-Health
+    spent I-Health
+    ..."
+    将拆分成:
+      tokens = ["New", "year/New", "me!", "I've", "spent", ...]
+      tags   = ["O",   "O",        "O",     "B-Health", "I-Health", ...]
+    """
+    text_lines = example[TEXT_FIELD].splitlines()
+    tokens, tags = [], []
+    for line in text_lines:
+        line = line.strip()
+        if not line:
+            # 跳过空行
+            continue
+        # 以最后一个空格分隔：左边为 token，右边为 tag
+        parts = line.rsplit(" ", 1)
+        if len(parts) == 2:
+            token, tag = parts
+            tokens.append(token)
+            tags.append(tag)
+        else:
+            # 若无法正常分割标签，就给一个默认O标签
+            tokens.append(line)
+            tags.append("O")
+
+    return {
+        "tokens": tokens,
+        TAGS_FIELD: tags
+    }
+
+class SelfDisclosureDataset(TorchDataset):
     """
     Dataset class for self-disclosure detection task.
-    
-    This class handles the preprocessing of the reddit-self-disclosure dataset
-    for both sentence-level classification and span-level detection tasks.
+
+    Handles preprocessing for both sentence-level classification and span-level detection tasks.
     """
-    
-    def __init__(self, dataset, tokenizer, max_length=512, task="classification"):
+
+    def __init__(
+        self, 
+        dataset,   # HuggingFace Dataset 对象
+        tokenizer: AutoTokenizer, 
+        max_length: int = 512, 
+        task: str = "classification"
+    ):
         """
-        Initialize the dataset.
-        
+        Initialize the dataset with enhanced error handling.
+
         Args:
-            dataset: The HuggingFace dataset
-            tokenizer: The tokenizer to use for encoding
-            max_length: Maximum sequence length
-            task: Either "classification" for sentence-level or "span" for span-level detection
+            dataset: HuggingFace Dataset object
+            tokenizer: Initialized tokenizer with pad_token set
+            max_length: Maximum sequence length (default: 512)
+            task: Task type ("classification" or "span")
         """
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.task = task
-        
-    def __len__(self):
+
+        # Validate task type
+        if task not in ("classification", "span"):
+            raise ValueError(f"Invalid task type: {task}. Choose 'classification' or 'span'")
+
+        # Ensure tokenizer has pad token
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token or "[PAD]"
+
+    def __len__(self) -> int:
         return len(self.dataset)
-    
-    def __getitem__(self, idx):
-        """
-        Get a single example from the dataset.
-        
-        For classification task, returns tokenized text and binary label.
-        For span task, returns tokenized text and token-level labels.
-        """
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         item = self.dataset[idx]
-        
         if self.task == "classification":
-            # For sentence-level classification
-            encoding = self.tokenizer(
-                item["text"],
-                truncation=True,
-                max_length=self.max_length,
-                padding="max_length",
-                return_tensors="pt"
-            )
-            
-            # Remove batch dimension
-            encoding = {k: v.squeeze(0) for k, v in encoding.items()}
-            encoding["labels"] = torch.tensor(item["label"], dtype=torch.long)
-            
-            return encoding
-        
-        elif self.task == "span":
-            # For span-level detection (IOB2 format)
-            tokens = item["tokens"]
-            iob_tags = item["tags"]
-            
-            # Convert IOB2 tags to binary labels (1 for B- or I-, 0 for O)
-            binary_labels = [1 if tag.startswith(("B-", "I-")) else 0 for tag in iob_tags]
-            
-            # Tokenize and align labels
-            encoding = self.tokenizer(
-                tokens,
-                is_split_into_words=True,
-                truncation=True,
-                max_length=self.max_length,
-                padding="max_length",
-                return_tensors="pt"
-            )
-            
-            # Remove batch dimension
-            encoding = {k: v.squeeze(0) for k, v in encoding.items()}
-            
-            # Align labels with wordpiece tokens
-            word_ids = encoding.word_ids()
-            aligned_labels = []
-            
-            for word_id in word_ids:
-                if word_id is None:
-                    # Special tokens get label -100 (ignored in loss)
-                    aligned_labels.append(-100)
-                else:
-                    # Use the label of the word
-                    if word_id < len(binary_labels):
-                        aligned_labels.append(binary_labels[word_id])
-                    else:
-                        # Handle truncation
-                        aligned_labels.append(-100)
-            
-            encoding["labels"] = torch.tensor(aligned_labels, dtype=torch.long)
-            
-            return encoding
-        
+            return self._process_classification_item(item)
         else:
-            raise ValueError(f"Unknown task: {self.task}")
+            return self._process_span_item(item)
+
+    def _process_classification_item(self, item: Dict) -> Dict[str, torch.Tensor]:
+        """Process item for sentence-level classification task."""
+        encoding = self.tokenizer(
+            item[TEXT_FIELD],
+            truncation=True,
+            max_length=self.max_length,
+            padding="max_length",
+            return_tensors="pt"
+        )
+
+        # 若 label 不存在，则默认为 0；或者可自定义
+        label_value = item[LABEL_FIELD] if LABEL_FIELD in item else 0
+        return {
+            "input_ids": encoding["input_ids"].squeeze(0),
+            "attention_mask": encoding["attention_mask"].squeeze(0),
+            "labels": torch.tensor(label_value, dtype=torch.long)
+        }
+
+    def _process_span_item(self, item: Dict) -> Dict[str, torch.Tensor]:
+        """
+        Process item for span-level detection task with improved label alignment.
+        - Expects `tokens` as a list of tokens
+        - Expects `tags` as a list of IOB/BIO labels, which we'll map to binary 0/1
+          (tag starts with 'B-' or 'I-' => 1, else => 0)
+        """
+        if "tokens" in item and TAGS_FIELD in item:
+            tokens = item["tokens"]
+            iob_tags = item[TAGS_FIELD]
+        else:
+            # 如果仍然没有 tokens/tags，可自行 fallback：
+            # tokens = item[TEXT_FIELD].split()
+            # iob_tags = ["O"] * len(tokens)
+            raise KeyError("Item does not contain 'tokens' or 'tags'. Please parse them first.")
+
+        # Convert IOB2 to binary labels with truncation
+        max_allowed = self.max_length - 2  # [CLS]/[SEP] 留两个位置
+        binary_labels = [
+            1 if tag.startswith(("B-", "I-")) else 0
+            for tag in iob_tags[:max_allowed]
+        ]
+
+        # Tokenize with word alignment
+        encoding = self.tokenizer(
+            tokens,
+            is_split_into_words=True,
+            truncation=True,
+            max_length=self.max_length,
+            padding="max_length",
+            return_tensors="pt"
+        )
+
+        # Align labels with subword tokens
+        word_ids = encoding.word_ids()
+        aligned_labels = []
+        for word_id in word_ids:
+            if word_id is None:
+                aligned_labels.append(-100)  # special tokens [CLS], [SEP], padding
+            elif word_id >= len(binary_labels):
+                aligned_labels.append(-100)
+            else:
+                aligned_labels.append(binary_labels[word_id])
+
+        return {
+            "input_ids": encoding["input_ids"].squeeze(0),
+            "attention_mask": encoding["attention_mask"].squeeze(0),
+            "labels": torch.tensor(aligned_labels, dtype=torch.long)
+        }
 
 
-def load_self_disclosure_dataset(tokenizer, batch_size=16, task="classification"):
+def load_self_disclosure_dataset(
+    tokenizer: AutoTokenizer,
+    batch_size: int = 16,
+    task: str = "classification"
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
-    Load and prepare the reddit-self-disclosure dataset.
-    
-    Args:
-        tokenizer: The tokenizer to use
-        batch_size: Batch size for DataLoader
-        task: Either "classification" for sentence-level or "span" for span-level detection
-    
-    Returns:
-        train_dataloader, val_dataloader, test_dataloader
+    Enhanced data loading function.
+    - Loads the reddit-self-disclosure dataset
+    - Auto-splits if needed
+    - If task == 'span', will parse each item['text'] into tokens/tags
+    - Returns (train_dataloader, val_dataloader, test_dataloader)
     """
     try:
-        # Try to load the dataset from Hugging Face
+        # 加载原始数据集
         dataset = load_dataset("douy/reddit-self-disclosure")
-        
-        # If the dataset requires login, we'll need to handle that separately
-        # This is a placeholder for the actual dataset structure
-        if "train" not in dataset:
-            print("Dataset structure doesn't match expectations. Using mock data for development.")
-            # Create mock data for development
-            return create_mock_dataloaders(tokenizer, batch_size, task)
-        
-        # Create dataset objects
-        train_dataset = SelfDisclosureDataset(dataset["train"], tokenizer, task=task)
-        val_dataset = SelfDisclosureDataset(dataset["validation"], tokenizer, task=task)
-        test_dataset = SelfDisclosureDataset(dataset["test"], tokenizer, task=task)
-        
-        # Create dataloaders
-        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        val_dataloader = DataLoader(val_dataset, batch_size=batch_size)
-        test_dataloader = DataLoader(test_dataset, batch_size=batch_size)
-        
-        return train_dataloader, val_dataloader, test_dataloader
-    
+
+        # 统一转换为 DatasetDict 格式
+        if not isinstance(dataset, DatasetDict):
+            dataset = DatasetDict({'train': dataset})
+
+        # 如果缺少 validation/test，就自动划分
+        if not all(split in dataset for split in SPLIT_NAMES):
+            print("自动划分验证集和测试集...")
+            dataset = self_disclosure_train_test_split(dataset)
+
+        # 若是 span-level 任务，进一步解析 text -> tokens/tags
+        if task == "span":
+            for split in dataset.keys():
+                dataset[split] = dataset[split].map(parse_text_into_tokens_and_tags)
+
+        return create_dataloaders(dataset, tokenizer, batch_size, task)
+
     except Exception as e:
-        print(f"Error loading dataset: {e}")
-        print("Using mock data for development.")
+        print(f"数据加载失败: {str(e)}, 使用模拟数据")
         return create_mock_dataloaders(tokenizer, batch_size, task)
 
 
-def create_mock_dataloaders(tokenizer, batch_size=16, task="classification"):
+def self_disclosure_train_test_split(dataset: DatasetDict) -> DatasetDict:
     """
-    Create mock data for development when the actual dataset is not accessible.
-    
-    Args:
-        tokenizer: The tokenizer to use
-        batch_size: Batch size for DataLoader
-        task: Either "classification" for sentence-level or "span" for span-level detection
-    
+    将原始训练集划分为train/val/test (80/10/10)
+    """
+    # 首次拆分：80%训练，20%临时
+    train_test = dataset['train'].train_test_split(
+        test_size=0.2, 
+        seed=42,
+        shuffle=True
+    )
+
+    # 二次拆分：20%中分 50%验证，50%测试
+    val_test = train_test['test'].train_test_split(
+        test_size=0.5, 
+        seed=42
+    )
+
+    return DatasetDict({
+        'train': train_test['train'],
+        'validation': val_test['train'],
+        'test': val_test['test']
+    })
+
+
+def create_dataloaders(
+    dataset: DatasetDict,
+    tokenizer: AutoTokenizer,
+    batch_size: int,
+    task: str
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """Create dataloaders from validated dataset."""
+    train_set = SelfDisclosureDataset(dataset[SPLIT_NAMES[0]], tokenizer, task=task)
+    val_set = SelfDisclosureDataset(dataset[SPLIT_NAMES[1]], tokenizer, task=task)
+    test_set = SelfDisclosureDataset(dataset[SPLIT_NAMES[2]], tokenizer, task=task)
+
+    return (
+        DataLoader(train_set, batch_size=batch_size, shuffle=True),
+        DataLoader(val_set, batch_size=batch_size),
+        DataLoader(test_set, batch_size=batch_size)
+    )
+
+
+def create_mock_dataloaders(
+    tokenizer: AutoTokenizer,
+    batch_size: int = 16,
+    task: str = "classification"
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    Create reproducible mock data with fixed random seed.
+
     Returns:
-        train_dataloader, val_dataloader, test_dataloader with mock data
+        (train_dataloader, val_dataloader, test_dataloader)
     """
-    from torch.utils.data import TensorDataset
-    
-    # Example sentences from the paper
+    torch.manual_seed(42)
+    generator = torch.Generator().manual_seed(42)
+
+    # Mock data samples for classification
     mock_data = [
-        {"text": "I am a 23-year-old who is currently going through the last leg of undergraduate school.", "label": 1},
-        {"text": "There is a joke in the design industry about that.", "label": 0},
-        {"text": "My husband and I live in US.", "label": 1},
-        {"text": "I was messing with advanced voice the other day and I was like, 'Oh, I can do this.'", "label": 0},
-        {"text": "I'm 16F I think I want to be a bi M", "label": 1},
-        {"text": "I am exploring my sexual identity", "label": 1},
-        {"text": "I have a desire to explore new options", "label": 1},
-        {"text": "I live in New Mexico.", "label": 1},
-        {"text": "I live in the Southwest of the United States.", "label": 1},
-        {"text": "My father-in-law was not a great father/husband, even my own father was not a great husband (lots of resentment spanning decades), but I digress.", "label": 1},
+        {TEXT_FIELD: "I'm a 23-year-old undergrad.", LABEL_FIELD: 1},
+        {TEXT_FIELD: "Design industry joke.", LABEL_FIELD: 0},
+        {TEXT_FIELD: "Live in US with husband.", LABEL_FIELD: 1},
     ]
-    
-    # For span detection, we need token-level annotations
+
+    # Mock data samples for span detection
     mock_span_data = [
         {
-            "tokens": ["I", "am", "a", "23-year-old", "who", "is", "currently", "going", "through", "the", "last", "leg", "of", "undergraduate", "school", "."],
-            "tags": ["O", "O", "O", "B-AGE", "O", "O", "O", "O", "O", "O", "O", "O", "O", "B-EDUCATION", "I-EDUCATION", "O"]
+            "tokens": ["I", "am", "23-year-old"], 
+            TAGS_FIELD: ["O", "O", "B-AGE"]
         },
         {
-            "tokens": ["There", "is", "a", "joke", "in", "the", "design", "industry", "about", "that", "."],
-            "tags": ["O", "O", "O", "O", "O", "O", "O", "O", "O", "O", "O"]
-        },
-        {
-            "tokens": ["My", "husband", "and", "I", "live", "in", "US", "."],
-            "tags": ["O", "B-RELATIONSHIP_STATUS", "O", "O", "O", "O", "B-LOCATION", "O"]
+            "tokens": ["Design", "industry", "joke"], 
+            TAGS_FIELD: ["O", "O", "O"]
         }
     ]
-    
+
     if task == "classification":
-        # Prepare classification data
-        encodings = []
-        labels = []
-        
-        for item in mock_data:
-            encoding = tokenizer(
-                item["text"],
+        encodings = [
+            tokenizer(
+                item[TEXT_FIELD],
                 truncation=True,
                 max_length=128,
                 padding="max_length",
                 return_tensors="pt"
-            )
-            
-            encodings.append({k: v.squeeze(0) for k, v in encoding.items()})
-            labels.append(item["label"])
-        
-        # Create tensor datasets
-        input_ids = torch.stack([item["input_ids"] for item in encodings])
-        attention_mask = torch.stack([item["attention_mask"] for item in encodings])
-        labels = torch.tensor(labels, dtype=torch.long)
-        
-        dataset = TensorDataset(input_ids, attention_mask, labels)
-    
-    else:  # span detection
-        # Prepare span detection data
-        encodings = []
-        all_labels = []
-        
+            ) for item in mock_data
+        ]
+
+        dataset = TensorDataset(
+            torch.stack([e["input_ids"].squeeze(0) for e in encodings]),
+            torch.stack([e["attention_mask"].squeeze(0) for e in encodings]),
+            torch.tensor([item[LABEL_FIELD] for item in mock_data], dtype=torch.long)
+        )
+    else:
+        # span-level
+        all_encodings = []
         for item in mock_span_data:
-            # Convert IOB2 tags to binary labels
-            binary_labels = [1 if tag.startswith(("B-", "I-")) else 0 for tag in item["tags"]]
-            
             encoding = tokenizer(
                 item["tokens"],
                 is_split_into_words=True,
@@ -231,43 +308,36 @@ def create_mock_dataloaders(tokenizer, batch_size=16, task="classification"):
                 padding="max_length",
                 return_tensors="pt"
             )
-            
-            # Align labels with wordpiece tokens
-            word_ids = encoding.word_ids(batch_index=0)
-            aligned_labels = []
-            
-            for word_id in word_ids:
-                if word_id is None:
-                    aligned_labels.append(-100)
-                else:
-                    if word_id < len(binary_labels):
-                        aligned_labels.append(binary_labels[word_id])
-                    else:
-                        aligned_labels.append(-100)
-            
-            encodings.append({k: v.squeeze(0) for k, v in encoding.items()})
-            all_labels.append(torch.tensor(aligned_labels, dtype=torch.long))
-        
-        # Create tensor datasets
-        input_ids = torch.stack([item["input_ids"] for item in encodings])
-        attention_mask = torch.stack([item["attention_mask"] for item in encodings])
-        labels = torch.stack(all_labels)
-        
-        dataset = TensorDataset(input_ids, attention_mask, labels)
-    
-    # Split into train/val/test (60/20/20)
-    total_size = len(dataset)
-    train_size = int(0.6 * total_size)
-    val_size = int(0.2 * total_size)
-    test_size = total_size - train_size - val_size
-    
-    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size, test_size]
+            word_ids = encoding.word_ids()
+            binary_labels = [1 if tag.startswith(("B-", "I-")) else 0 for tag in item[TAGS_FIELD]]
+            aligned_labels = [
+                binary_labels[word_id] if word_id is not None and word_id < len(binary_labels) else -100
+                for word_id in word_ids
+            ]
+
+            all_encodings.append((
+                encoding["input_ids"].squeeze(0),
+                encoding["attention_mask"].squeeze(0),
+                torch.tensor(aligned_labels, dtype=torch.long)
+            ))
+
+        dataset = TensorDataset(
+            torch.stack([e[0] for e in all_encodings]),
+            torch.stack([e[1] for e in all_encodings]),
+            torch.stack([e[2] for e in all_encodings])
+        )
+
+    # Reproducible split
+    train_size = int(0.6 * len(dataset))
+    val_size = int(0.2 * len(dataset))
+    splits = [train_size, val_size, len(dataset) - train_size - val_size]
+
+    train_set, val_set, test_set = torch.utils.data.random_split(
+        dataset, splits, generator=generator
     )
-    
-    # Create dataloaders
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size)
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size)
-    
-    return train_dataloader, val_dataloader, test_dataloader
+
+    return (
+        DataLoader(train_set, batch_size=batch_size, shuffle=True, generator=generator),
+        DataLoader(val_set, batch_size=batch_size),
+        DataLoader(test_set, batch_size=batch_size)
+    )
