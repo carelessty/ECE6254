@@ -27,7 +27,7 @@ def run_sample_analysis():
     set_seed(42)
     
     # Create output directory
-    output_dir = "/home/ubuntu/privacy_risk_detection/results/sample_analysis"
+    output_dir = "./privacy_risk_detection/results/sample_analysis"
     os.makedirs(output_dir, exist_ok=True)
     
     # Create mock tokenizer and data

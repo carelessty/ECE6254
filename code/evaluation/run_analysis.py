@@ -30,7 +30,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="/home/ubuntu/privacy_risk_detection/results",
+        default="./results",
         help="Directory to save results"
     )
     
