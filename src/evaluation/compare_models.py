@@ -16,7 +16,7 @@ import torch
 from transformers import AutoTokenizer, set_seed
 
 from src.implementation.data_utils import load_self_disclosure_dataset
-from src.implementation.model import PrivacyRiskClassifier, FewShotPrivacyRiskClassifier
+from src.implementation.model import PrivacyRiskClassifier
 from evaluator import PrivacyRiskEvaluator, load_reference_model
 
 def parse_args():
@@ -47,13 +47,6 @@ def parse_args():
     )
     
     # Approach arguments
-    parser.add_argument(
-        "--approach",
-        type=str,
-        choices=["fine-tuning", "few-shot"],
-        default="few-shot",
-        help="Approach to use for DeepSeek model: fine-tuning or few-shot learning"
-    )
     parser.add_argument(
         "--use_lora",
         action="store_true",
@@ -112,18 +105,12 @@ def main():
     # Initialize models
     print("Initializing models...")
     
-    # Initialize DeepSeek model
-    if args.approach == "fine-tuning":
-        deepseek_model = PrivacyRiskClassifier(
-            model_name=args.deepseek_model,
-            task=args.task,
-            use_lora=args.use_lora
-        )
-    else:  # few-shot learning
-        deepseek_model = FewShotPrivacyRiskClassifier(
-            model_name=args.deepseek_model,
-            task=args.task
-        )
+    # Initialize DeepSeek model with fine-tuning approach
+    deepseek_model = PrivacyRiskClassifier(
+        model_name=args.deepseek_model,
+        task=args.task,
+        use_lora=args.use_lora
+    )
     
     # Initialize reference model
     reference_model = load_reference_model(args.reference_model)
@@ -134,7 +121,7 @@ def main():
     # Define model configurations for comparison
     model_configs = [
         {
-            "name": f"DeepSeek-R1-Distill-Qwen-1.5B ({args.approach})",
+            "name": "DeepSeek-R1-Distill-Qwen-1.5B (fine-tuning)",
             "model": deepseek_model
         },
         {

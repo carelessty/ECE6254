@@ -20,7 +20,6 @@ from transformers import AutoTokenizer, set_seed
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 from src.implementation.data_utils import create_mock_dataloaders
-from src.implementation.model import FewShotPrivacyRiskClassifier
 from evaluator import load_reference_model, PrivacyRiskEvaluator
 
 def run_sample_analysis():
@@ -64,7 +63,7 @@ def run_sample_analysis():
     # Define model configurations for comparison
     model_configs = [
         {
-            "name": "DeepSeek-R1-Distill-Qwen-1.5B (few-shot)",
+            "name": "DeepSeek-R1-Distill-Qwen-1.5B (fine-tuning)",
             "model": MockDeepSeekModel()
         },
         {
@@ -212,7 +211,7 @@ def generate_report(comparison, output_dir):
     
     if model1_f1 >= model2_f1:
         report += "1. DeepSeek-R1-Distill-Qwen-1.5B shows strong potential for privacy risk detection in user-generated content.\n"
-        report += "2. The model can be effectively adapted using few-shot learning or fine-tuning approaches.\n"
+        report += "2. The model can be effectively adapted using fine-tuning approaches.\n"
         report += "3. Further optimization could potentially improve performance even further.\n\n"
     else:
         report += "1. While DeepSeek-R1-Distill-Qwen-1.5B shows promise, it currently underperforms compared to the reference model.\n"

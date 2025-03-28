@@ -26,7 +26,7 @@ class PrivacyRiskClassifier:
     Wrapper class for privacy risk detection models.
     
     This class handles different approaches for adapting DeepSeek-R1-Distill-Qwen-1.5B
-    for privacy risk detection tasks, including fine-tuning and few-shot learning.
+    for privacy risk detection tasks, including fine-tuning.
     """
     
     def __init__(
@@ -362,56 +362,50 @@ class PrivacyRiskClassifier:
     def _predict_generative(self, texts):
         """Make predictions using generative models with prompt-based approach."""
         results = []
-        
+
         for text in texts:
             if self.task == "classification":
-                # Prompt for classification
-                prompt = f"Determine if the following text contains self-disclosure (personal information). Answer with 'Yes' or 'No'.\n\nText: {text}\n\nContains self-disclosure:"
+                prompt = (
+                    f"Determine if the following text contains self-disclosure (personal information). "
+                    f"Answer with 'Yes' or 'No'.\n\nText: {text}\n\nContains self-disclosure:"
+                )
             else:
-                # Prompt for span detection
-                prompt = f"Identify spans of text that contain self-disclosure (personal information) in the following text. Mark each word as either 'D' for disclosure or 'N' for non-disclosure.\n\nText: {text}\n\nLabels:"
-            
-            # Tokenize prompt
+                prompt = (
+                    f"Identify spans of text that contain self-disclosure (personal information) in the following text. "
+                    f"Mark each word as either 'D' for disclosure or 'N' for non-disclosure.\n\nText: {text}\n\nLabels:"
+                )
+
             inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-            
-            # Generate response
+
             with torch.no_grad():
                 output = self.model.generate(
                     **inputs,
                     max_new_tokens=50,
-                    temperature=0.1,
-                    do_sample=False
+                    #temperature=0.1,
+                    do_sample=False,
+                    pad_token_id=self.tokenizer.pad_token_id  # ✅ FIXED
                 )
-            
-            # Decode response
+
             response = self.tokenizer.decode(output[0], skip_special_tokens=True)
-            
-            # Extract prediction from response
+
             if self.task == "classification":
-                # For classification, extract Yes/No
                 try:
                     prediction = 1 if "Yes" in response.split(prompt)[1] else 0
                 except IndexError:
-                    # Handle case where response doesn't contain the prompt
                     prediction = 1 if "Yes" in response else 0
             else:
-                # For span detection, extract D/N labels
                 try:
                     labels_text = response.split(prompt)[1].strip()
                     prediction = [1 if label == 'D' else 0 for label in labels_text.split()]
-                    # Ensure prediction is not empty
                     if not prediction:
-                        # Default to all non-disclosure if no labels were extracted
-                        words = text.split()
-                        prediction = [0] * len(words)
+                        prediction = [0] * len(text.split())
                 except (IndexError, ValueError):
-                    # Handle case where response doesn't contain the prompt or is malformed
-                    words = text.split()
-                    prediction = [0] * len(words)
-            
+                    prediction = [0] * len(text.split())
+
             results.append(prediction)
-        
+
         return results
+
     
     def save(self, path):
         """Save the model and tokenizer."""
@@ -423,176 +417,3 @@ class PrivacyRiskClassifier:
         """Load a saved model."""
         instance = cls(model_name=path, task=task, device=device)
         return instance
-
-
-class FewShotPrivacyRiskClassifier:
-    """
-    Few-shot learning approach for privacy risk detection.
-    
-    This class implements few-shot learning using DeepSeek-R1-Distill-Qwen-1.5B
-    without fine-tuning, leveraging the model's in-context learning capabilities.
-    """
-    
-    def __init__(
-        self,
-        model_name="deepseek-ai/deepseek-r1-distill-qwen-1.5b",
-        task="classification",
-        device=None
-    ):
-        """
-        Initialize the few-shot privacy risk classifier.
-        
-        Args:
-            model_name: Name or path of the pre-trained model
-            task: Either "classification" for sentence-level or "span" for span-level detection
-            device: Device to use (None for auto-detection)
-        """
-        self.model_name = model_name
-        self.task = task
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # Initialize tokenizer and model
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.bfloat16,
-            device_map=self.device
-        )
-        
-        # Ensure the tokenizer has padding token
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        
-        # Example prompts for few-shot learning
-        self._initialize_examples()
-    
-    def _initialize_examples(self):
-        """Initialize example prompts for few-shot learning."""
-        if self.task == "classification":
-            # Examples for sentence-level classification
-            self.examples = [
-                {
-                    "text": "I am a 23-year-old who is currently going through the last leg of undergraduate school.",
-                    "label": "Yes"
-                },
-                {
-                    "text": "There is a joke in the design industry about that.",
-                    "label": "No"
-                },
-                {
-                    "text": "My husband and I live in US.",
-                    "label": "Yes"
-                },
-                {
-                    "text": "I was messing with advanced voice the other day and I was like, 'Oh, I can do this.'",
-                    "label": "No"
-                },
-                {
-                    "text": "I'm 16F I think I want to be a bi M",
-                    "label": "Yes"
-                }
-            ]
-        else:
-            # Examples for span-level detection
-            self.examples = [
-                {
-                    "text": "I am a 23-year-old who is currently going through the last leg of undergraduate school.",
-                    "labels": "N N N D D D N N N N N N N D D N"
-                },
-                {
-                    "text": "My husband and I live in US.",
-                    "labels": "N D N N N N D N"
-                },
-                {
-                    "text": "I'm 16F I think I want to be a bi M",
-                    "labels": "N D N N N N N D D"
-                }
-            ]
-    
-    def predict(self, texts):
-        """
-        Make predictions on the provided texts using few-shot learning.
-        
-        Args:
-            texts: List of texts to classify
-        
-        Returns:
-            Predictions (labels for classification, spans for span detection)
-        """
-        results = []
-        
-        for text in texts:
-            # Create prompt with examples
-            prompt = self._create_prompt(text)
-            
-            # Tokenize prompt
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-            
-            # Generate response
-            with torch.no_grad():
-                output = self.model.generate(
-                    **inputs,
-                    max_new_tokens=50,
-                    temperature=0.1,
-                    do_sample=False
-                )
-            
-            # Decode response
-            response = self.tokenizer.decode(output[0], skip_special_tokens=True)
-            
-            # Extract prediction from response
-            prediction = self._extract_prediction(response, prompt)
-            results.append(prediction)
-        
-        return results
-    
-    def _create_prompt(self, text):
-        """Create a prompt with examples for few-shot learning."""
-        if self.task == "classification":
-            # Prompt for classification
-            prompt = "Determine if the following texts contain self-disclosure (personal information). Answer with 'Yes' or 'No'.\n\n"
-            
-            # Add examples
-            for example in self.examples:
-                prompt += f"Text: {example['text']}\nContains self-disclosure: {example['label']}\n\n"
-            
-            # Add the text to classify
-            prompt += f"Text: {text}\nContains self-disclosure:"
-        
-        else:
-            # Prompt for span detection
-            prompt = "Identify spans of text that contain self-disclosure (personal information) in the following texts. Mark each word as either 'D' for disclosure or 'N' for non-disclosure.\n\n"
-            
-            # Add examples
-            for example in self.examples:
-                prompt += f"Text: {example['text']}\nLabels: {example['labels']}\n\n"
-            
-            # Add the text to classify
-            prompt += f"Text: {text}\nLabels:"
-        
-        return prompt
-    
-    def _extract_prediction(self, response, prompt):
-        """Extract prediction from model response."""
-        # Get the part after the prompt
-        try:
-            result = response[len(prompt):].strip()
-        except:
-            # Handle case where response is unexpected
-            result = response.strip()
-        
-        if self.task == "classification":
-            # For classification, extract Yes/No
-            if result.startswith("Yes"):
-                return 1
-            else:
-                return 0
-        else:
-            # For span detection, extract D/N labels
-            try:
-                labels = result.split()
-                return [1 if label == 'D' else 0 for label in labels]
-            except (IndexError, ValueError):
-                # Handle case where response is malformed
-                # Default to all non-disclosure
-                return [0] * 10  # Default length if we can't determine

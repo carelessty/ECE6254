@@ -10,7 +10,7 @@ import torch
 from transformers import AutoTokenizer, set_seed
 
 from data_utils import load_self_disclosure_dataset
-from model import PrivacyRiskClassifier, FewShotPrivacyRiskClassifier
+from model import PrivacyRiskClassifier
 
 def parse_args():
     """Parse command line arguments."""
@@ -40,13 +40,6 @@ def parse_args():
     )
     
     # Training arguments
-    parser.add_argument(
-        "--approach",
-        type=str,
-        choices=["fine-tuning", "few-shot"],
-        default="fine-tuning",
-        help="Approach to use: fine-tuning or few-shot learning"
-    )
     parser.add_argument(
         "--use_lora",
         action="store_true",
@@ -107,73 +100,46 @@ def main():
     )
     
     # Initialize model
-    if args.approach == "fine-tuning":
-        print(f"Initializing {args.model_name} for fine-tuning...")
-        model = PrivacyRiskClassifier(
-            model_name=args.model_name,
-            task=args.task,
-            use_lora=args.use_lora
-        )
-        
-        # Train model
-        print("Training model...")
-        model.train(
-            train_dataloader,
-            val_dataloader,
-            output_dir=os.path.join(args.output_dir, "model"),
-            num_epochs=args.num_epochs
-        )
-        
-        # Save model
-        model.save(os.path.join(args.output_dir, "model"))
-        
-        # Evaluate model
-        print("Evaluating model...")
-        # Extract texts and labels from test dataloader
-        texts = []
-        labels = []
-        for batch in test_dataloader:
-            batch_texts = tokenizer.batch_decode(batch[0], skip_special_tokens=True)
-            batch_labels = batch[2].tolist()
-            texts.extend(batch_texts)
-            labels.extend(batch_labels)
-        
-        # Make predictions
-        predictions = model.predict(texts)
-        
-        # Calculate metrics
-        accuracy = sum(p == l for p, l in zip(predictions, labels)) / len(labels)
-        print(f"Test accuracy: {accuracy:.4f}")
+    print(f"Initializing {args.model_name} for fine-tuning...")
+    model = PrivacyRiskClassifier(
+        model_name=args.model_name,
+        task=args.task,
+        use_lora=args.use_lora
+    )
     
-    else:  # few-shot learning
-        print(f"Initializing {args.model_name} for few-shot learning...")
-        model = FewShotPrivacyRiskClassifier(
-            model_name=args.model_name,
-            task=args.task
-        )
-        
-        # Evaluate model
-        print("Evaluating model...")
-        # Extract texts and labels from test dataloader
-        texts = []
-        labels = []
-        for batch in test_dataloader:
-            batch_texts = tokenizer.batch_decode(batch[0], skip_special_tokens=True)
-            batch_labels = batch[2].tolist()
-            texts.extend(batch_texts)
-            labels.extend(batch_labels)
-        
-        # Make predictions
-        predictions = model.predict(texts)
-        
-        # Calculate metrics
-        accuracy = sum(p == l for p, l in zip(predictions, labels)) / len(labels)
-        print(f"Test accuracy: {accuracy:.4f}")
+    # Train model
+    print("Training model...")
+    model.train(
+        train_dataloader,
+        val_dataloader,
+        output_dir=os.path.join(args.output_dir, "model"),
+        num_epochs=args.num_epochs
+    )
+    
+    # Save model
+    model.save(os.path.join(args.output_dir, "model"))
+    
+    # Evaluate model
+    print("Evaluating model...")
+    # Extract texts and labels from test dataloader
+    texts = []
+    labels = []
+    for batch in test_dataloader:
+        batch_texts = tokenizer.batch_decode(batch[0], skip_special_tokens=True)
+        batch_labels = batch[2].tolist()
+        texts.extend(batch_texts)
+        labels.extend(batch_labels)
+    
+    # Make predictions
+    predictions = model.predict(texts)
+    
+    # Calculate metrics
+    accuracy = sum(p == l for p, l in zip(predictions, labels)) / len(labels)
+    print(f"Test accuracy: {accuracy:.4f}")
     
     # Save results
     with open(os.path.join(args.output_dir, "results.txt"), "w") as f:
         f.write(f"Model: {args.model_name}\n")
-        f.write(f"Approach: {args.approach}\n")
         f.write(f"Task: {args.task}\n")
         f.write(f"Test accuracy: {accuracy:.4f}\n")
     

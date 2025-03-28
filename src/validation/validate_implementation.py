@@ -102,8 +102,7 @@ def validate_model():
     
     # Check if the necessary classes exist
     required_classes = [
-        'PrivacyRiskClassifier',
-        'FewShotPrivacyRiskClassifier'
+        'PrivacyRiskClassifier'
     ]
     
     all_exist = True

@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from transformers import AutoTokenizer, set_seed
 
 from src.implementation.data_utils import load_self_disclosure_dataset
-from src.implementation.model import PrivacyRiskClassifier, FewShotPrivacyRiskClassifier
+from src.implementation.model import PrivacyRiskClassifier
 from src.evaluation.evaluator import PrivacyRiskEvaluator, load_reference_model
 from src.evaluation.config import EXPERIMENTS
 
@@ -28,7 +28,7 @@ def parse_args():
     parser.add_argument(
         "--experiment",
         type=str,
-        default="sentence_classification_few_shot",
+        default="sentence_classification_fine_tuning",
         choices=[exp["name"] for exp in EXPERIMENTS],
         help="Name of experiment to run"
     )
@@ -95,20 +95,13 @@ def run_comparative_analysis(args):
     # Initialize models
     print("Initializing models...")
     
-    # Initialize DeepSeek model
-    if experiment['approach'] == "fine-tuning":
-        print(f"Initializing {experiment['deepseek_model']} for fine-tuning...")
-        deepseek_model = PrivacyRiskClassifier(
-            model_name=experiment['deepseek_model'],
-            task=experiment['task'],
-            use_lora=experiment['use_lora']
-        )
-    else:  # few-shot learning
-        print(f"Initializing {experiment['deepseek_model']} for few-shot learning...")
-        deepseek_model = FewShotPrivacyRiskClassifier(
-            model_name=experiment['deepseek_model'],
-            task=experiment['task']
-        )
+    # Initialize DeepSeek model with fine-tuning approach
+    print(f"Initializing {experiment['deepseek_model']} for fine-tuning...")
+    deepseek_model = PrivacyRiskClassifier(
+        model_name=experiment['deepseek_model'],
+        task=experiment['task'],
+        use_lora=experiment['use_lora']
+    )
     
     # Initialize reference model
     print(f"Loading reference model: {experiment['reference_model']}...")
@@ -120,7 +113,7 @@ def run_comparative_analysis(args):
     # Define model configurations for comparison
     model_configs = [
         {
-            "name": f"DeepSeek-R1-Distill-Qwen-1.5B ({experiment['approach']})",
+            "name": "DeepSeek-R1-Distill-Qwen-1.5B (fine-tuning)",
             "model": deepseek_model
         },
         {

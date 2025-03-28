@@ -268,16 +268,24 @@ def create_mock_dataloaders(
         {TEXT_FIELD: "Live in US with husband.", LABEL_FIELD: 1},
     ]
 
-    # Mock data samples for span detection
+    # ✅ Enhanced mock data samples for span detection
     mock_span_data = [
         {
-            "tokens": ["I", "am", "23-year-old"], 
-            TAGS_FIELD: ["O", "O", "B-AGE"]
+            "tokens": ["I", "am", "23", "years", "old", "and", "studying", "medicine"],
+            TAGS_FIELD: ["O", "O", "B-AGE", "I-AGE", "I-AGE", "O", "O", "B-HEALTH"]
         },
         {
-            "tokens": ["Design", "industry", "joke"], 
-            TAGS_FIELD: ["O", "O", "O"]
-        }
+            "tokens": ["Weather", "is", "nice", "today"],
+            TAGS_FIELD: ["O", "O", "O", "O"]
+        },
+        {
+            "tokens": ["My", "husband", "and", "I", "live", "in", "Canada"],
+            TAGS_FIELD: ["O", "B-FAMILY", "O", "O", "O", "O", "B-LOC"]
+        },
+        {
+            "tokens": ["I", "don't", "want", "to", "share", "anything", "personal"],
+            TAGS_FIELD: ["O", "O", "O", "O", "O", "O", "O"]
+        },
     ]
 
     if task == "classification":

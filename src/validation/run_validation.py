@@ -123,7 +123,7 @@ def generate_report(validation_output, output_dir):
         report += "2. For the full analysis with mock data:\n"
         report += "   ```bash\n"
         report += "   cd /home/ubuntu/privacy_risk_detection/code/evaluation\n"
-        report += "   python run_analysis.py --experiment sentence_classification_few_shot --use_mock_data\n"
+        report += "   python run_analysis.py --experiment sentence_classification_fine_tuning --use_mock_data\n"
         report += "   ```\n\n"
     else:
         report += "The implementation failed the reproducibility test. The sample test did not run successfully, indicating issues with the code execution or result generation.\n\n"
