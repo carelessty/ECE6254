@@ -4,6 +4,7 @@ Model configuration utilities for the self-disclosure detection task.
 
 import logging
 from typing import Dict, List, Optional, Union
+from src.model import RobertaForSelfDisclosureDetection
 
 import torch
 from transformers import (
@@ -59,7 +60,7 @@ def get_model_and_tokenizer(
     )
     
     # Load model
-    model = AutoModelForTokenClassification.from_pretrained(
+    model = RobertaForSelfDisclosureDetection.from_pretrained(
         model_name_or_path,
         config=config,
         cache_dir=cache_dir,
@@ -76,8 +77,8 @@ def get_training_args(
     warmup_steps: int = 500,
     weight_decay: float = 0.01,
     learning_rate: float = 5e-5,
-    save_strategy: str = "epoch",
-    evaluation_strategy: str = "epoch",
+    save_strategy: str = "steps",
+    evaluation_strategy: str = "steps",
     load_best_model_at_end: bool = True,
     metric_for_best_model: str = "f1",
     greater_is_better: bool = True,
@@ -126,7 +127,10 @@ def get_training_args(
         "logging_steps": 100,
         "save_total_limit": 2,
         "overwrite_output_dir": True,
-        "dataloader_num_workers": 4,
+        "dataloader_num_workers": 16,
         "group_by_length": True,
-        "report_to": "tensorboard"
+        "report_to": "tensorboard",
+        "label_names": ["labels"],
+        "save_steps": 500,
+        "eval_steps": 500,
     }

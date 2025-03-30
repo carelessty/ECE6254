@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 from typing import Dict, List, Optional
+from peft import get_peft_model, LoraConfig, TaskType
 
 import numpy as np
 import torch
@@ -172,7 +173,7 @@ def main():
                 val_split=args.val_split,
                 seed=args.seed
             )
-    
+    print(dataset)
     # Get label list
     label_list = get_labels(dataset["train"])
     num_labels = len(label_list)
@@ -186,7 +187,16 @@ def main():
         label_list=label_list,
         cache_dir=args.cache_dir,
     )
-    
+    lora_config = LoraConfig(
+    task_type=TaskType.TOKEN_CLS,
+    inference_mode=False,  # 训练模式下设置为 False
+    r=8,                 # 低秩矩阵的秩，可以根据需要调整
+    lora_alpha=32,       # 缩放因子
+    lora_dropout=0.1,    # dropout 概率
+    )
+
+    # 应用 LoRA 到模型
+    model = get_peft_model(model, lora_config)
     # Prepare dataset for training
     logger.info("Preparing dataset for training...")
     processed_dataset = prepare_dataset_for_training(
@@ -195,7 +205,7 @@ def main():
         max_length=512,
         label_all_tokens=False
     )
-    
+    print(processed_dataset)
     # Define compute_metrics function for the Trainer
     def compute_metrics_fn(eval_preds):
         preds, labels = eval_preds
