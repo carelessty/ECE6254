@@ -12,6 +12,7 @@ from transformers import (
     RobertaModel,
     RobertaPreTrainedModel,
 )
+from transformers.modeling_outputs import TokenClassifierOutput
 
 logger = logging.getLogger(__name__)
 
@@ -108,12 +109,12 @@ class RobertaForSelfDisclosureDetection(RobertaPreTrainedModel):
             output = (logits,) + outputs[2:]
             return ((loss,) + output) if loss is not None else output
         
-        return {
-            "loss": loss,
-            "logits": logits,
-            "hidden_states": outputs.hidden_states,
-            "attentions": outputs.attentions,
-        }
+        return TokenClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
 def create_model_config(
     model_name_or_path: str = "roberta-large",
