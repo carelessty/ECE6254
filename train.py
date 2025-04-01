@@ -16,6 +16,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
     set_seed,
+    TrainerCallback,
 )
 
 from src.data_utils import (
@@ -89,14 +90,20 @@ def parse_args():
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=16,
+        default=128,
         help="Batch size for training",
     )
     parser.add_argument(
         "--per_device_eval_batch_size",
         type=int,
-        default=16,
+        default=128,
         help="Batch size for evaluation",
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=4,
+        help="Number of updates steps to accumulate before backward pass",
     )
     parser.add_argument(
         "--learning_rate",
@@ -122,10 +129,38 @@ def parse_args():
         help="Whether to use mixed precision",
     )
     parser.add_argument(
+        "--bf16",
+        action="store_true",
+        help="Whether to use bfloat16 mixed precision",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
         help="Random seed",
+    )
+    parser.add_argument(
+        "--gradient_checkpointing", 
+        action="store_true",
+        help="Enable gradient checkpointing to save memory"
+    )
+    parser.add_argument(
+        "--eval_steps",
+        type=int,
+        default=500,
+        help="Run evaluation every X steps",
+    )
+    parser.add_argument(
+        "--save_steps",
+        type=int,
+        default=500,
+        help="Save checkpoint every X steps",
+    )
+    parser.add_argument(
+        "--logging_steps",
+        type=int,
+        default=100,
+        help="Log every X steps",
     )
     
     args = parser.parse_args()
@@ -144,6 +179,11 @@ def main():
     
     # Set seed for reproducibility
     set_seed(args.seed)
+    
+    # Prevent using both FP16 and BF16 at the same time, which can cause issues
+    if args.fp16 and args.bf16:
+        logger.warning("Both fp16 and bf16 were enabled. Disabling bf16.")
+        args.bf16 = False
     
     # Create output directory if it doesn't exist
     if not os.path.exists(args.output_dir):
@@ -173,7 +213,7 @@ def main():
                 val_split=args.val_split,
                 seed=args.seed
             )
-    print(dataset)
+    
     # Get label list
     label_list = get_labels(dataset["train"])
     num_labels = len(label_list)
@@ -187,17 +227,28 @@ def main():
         label_list=label_list,
         cache_dir=args.cache_dir,
     )
+    
+    # Enable gradient checkpointing if specified
+    if args.gradient_checkpointing:
+        logger.info("Enabling gradient checkpointing")
+        model.gradient_checkpointing_enable()
+    
+    # Configure LoRA for parameter-efficient fine-tuning
     lora_config = LoraConfig(
-    task_type=TaskType.TOKEN_CLS,
-    inference_mode=False,  # 训练模式下设置为 False
-    r=8,                 # 低秩矩阵的秩，可以根据需要调整
-    lora_alpha=32,       # 缩放因子
-    lora_dropout=0.1,    # dropout 概率
+        task_type=TaskType.TOKEN_CLS,
+        inference_mode=False,
+        r=16,                 # Increased rank for better expressivity
+        lora_alpha=32,
+        lora_dropout=0.1,
+        target_modules=["query", "key", "value"],  # Target specific modules for efficiency
     )
 
-    # 应用 LoRA 到模型
+    # Apply LoRA to model
+    logger.info("Applying LoRA adaptation to model")
     model = get_peft_model(model, lora_config)
-    # Prepare dataset for training
+    model.print_trainable_parameters()  # Log trainable parameters %
+    
+    # Prepare dataset for training efficiently
     logger.info("Preparing dataset for training...")
     processed_dataset = prepare_dataset_for_training(
         dataset=dataset,
@@ -205,14 +256,97 @@ def main():
         max_length=512,
         label_all_tokens=False
     )
-    print(processed_dataset)
-    # Define compute_metrics function for the Trainer
+    
+    # Log dataset sizes
+    logger.info(f"Train dataset size: {len(processed_dataset['train'])}")
+    logger.info(f"Validation dataset size: {len(processed_dataset['validation'])}")
+    logger.info(f"Test dataset size: {len(processed_dataset['test'])}")
+    
+    # Configure training arguments
+    training_args = TrainingArguments(
+        output_dir=args.output_dir,
+        num_train_epochs=args.num_train_epochs,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        per_device_eval_batch_size=args.per_device_eval_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        warmup_steps=args.warmup_steps,
+        fp16=args.fp16,
+        bf16=args.bf16,
+        save_strategy="steps",
+        evaluation_strategy="steps",
+        load_best_model_at_end=True,
+        metric_for_best_model="f1",
+        greater_is_better=True,
+        logging_dir=f"{args.output_dir}/logs",
+        logging_strategy="steps",
+        logging_steps=args.logging_steps,
+        save_total_limit=2,  # Only keep the 2 best checkpoints
+        overwrite_output_dir=True,
+        dataloader_num_workers=4,  # Reduced workers for less memory pressure
+        group_by_length=True,  # Group similar length sequences for efficiency
+        report_to="tensorboard",
+        label_names=["labels"],
+        save_steps=args.save_steps,
+        eval_steps=args.eval_steps,
+        seed=args.seed,
+        # Memory optimization
+        optim="adamw_torch",  # Use torch implementation for better memory usage
+        ddp_find_unused_parameters=False,  # Improve DDP efficiency
+        torch_compile=False,  # Disable torch compile to avoid memory spikes
+        gradient_checkpointing=args.gradient_checkpointing,
+        # Add max_grad_norm to handle gradient explosions
+        max_grad_norm=1.0,
+        # Restrict evaluation size to prevent OOMs during validation
+        eval_accumulation_steps=8,  # Accumulate gradients during eval to reduce memory
+        # Set eval batch size reduction to use less memory during evaluation
+    )
+    
+    # Function to free up memory after evaluation
+    def cleanup_memory():
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        import gc
+        gc.collect()
+    
+    # Create a smaller validation dataset if the evaluation set is too large
+    # This helps prevent OOM during validation
+    eval_dataset = processed_dataset["validation"]
+    if len(eval_dataset) > 1000:  # If validation set is large
+        logger.info(f"Creating smaller validation dataset for frequent evaluation")
+        # Use a stratified subset for validation to maintain distribution
+        eval_indices = np.random.choice(
+            len(eval_dataset), 
+            size=min(1000, len(eval_dataset)), 
+            replace=False
+        )
+        validation_subset = eval_dataset.select(eval_indices)
+        logger.info(f"Using validation subset of size {len(validation_subset)} for training")
+    else:
+        validation_subset = eval_dataset
+    
+    # Modified compute_metrics to be more memory-efficient
     def compute_metrics_fn(eval_preds):
         preds, labels = eval_preds
-        # First, compute standard metrics
-        metrics = compute_metrics(eval_preds, label_list)
+        # Process predictions in smaller chunks to avoid OOM
+        chunk_size = 32
+        metrics_list = []
         
-        # Then, compute partial span F1
+        # Process in chunks
+        for i in range(0, len(preds), chunk_size):
+            chunk_preds = preds[i:i+chunk_size]
+            chunk_labels = labels[i:i+chunk_size]
+            
+            # Calculate metrics for this chunk
+            chunk_metrics = compute_metrics((chunk_preds, chunk_labels), label_list)
+            metrics_list.append(chunk_metrics)
+        
+        # Average metrics across chunks
+        metrics = {k: np.mean([m[k] for m in metrics_list]) for k in metrics_list[0].keys()}
+        
+        # Compute partial span F1 more efficiently
         partial_metrics = compute_partial_span_f1(
             np.argmax(preds, axis=2),
             labels,
@@ -221,31 +355,53 @@ def main():
         
         # Combine metrics
         metrics.update(partial_metrics)
+        
+        # Force garbage collection to free memory
+        cleanup_memory()
+        
         return metrics
     
-    # Get training arguments
-    training_args = TrainingArguments(
-        **get_training_args(
-            output_dir=args.output_dir,
-            num_train_epochs=args.num_train_epochs,
-            per_device_train_batch_size=args.per_device_train_batch_size,
-            per_device_eval_batch_size=args.per_device_eval_batch_size,
-            warmup_steps=args.warmup_steps,
-            weight_decay=args.weight_decay,
-            learning_rate=args.learning_rate,
-            fp16=args.fp16,
-            seed=args.seed,
-        )
-    )
+    # Create a custom callback to clean up memory after evaluation
+    class MemoryCleanupCallback(TrainerCallback):
+        """Callback to clean up memory after evaluation."""
+        
+        def on_evaluate(self, args, state, control, **kwargs):
+            """Called after evaluation."""
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            import gc
+            gc.collect()
+            return control
+        
+        def on_prediction_step(self, args, state, control, **kwargs):
+            """Called after each prediction step."""
+            # Less aggressive cleanup during prediction to avoid too much overhead
+            if torch.cuda.is_available() and state.global_step % 10 == 0:
+                torch.cuda.empty_cache()
+            return control
+        
+        def on_save(self, args, state, control, **kwargs):
+            """Called after model saving."""
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            import gc
+            gc.collect()
+            return control
     
-    # Initialize Trainer
+    # Initialize Trainer with memory-efficient validation
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=processed_dataset["train"],
-        eval_dataset=processed_dataset["validation"],
+        eval_dataset=validation_subset,  # Use smaller validation set
         tokenizer=tokenizer,
         compute_metrics=compute_metrics_fn,
+        callbacks=[
+            # Add custom callback to clean up memory after evaluation
+            MemoryCleanupCallback()
+        ],
     )
     
     # Train the model

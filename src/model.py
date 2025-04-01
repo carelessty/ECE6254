@@ -31,7 +31,7 @@ class RobertaForSelfDisclosureDetection(RobertaPreTrainedModel):
         # RoBERTa model
         self.roberta = RobertaModel(config, add_pooling_layer=False)
         
-        # Classification head
+        # Classification head with optimized memory usage
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
         
@@ -71,7 +71,7 @@ class RobertaForSelfDisclosureDetection(RobertaPreTrainedModel):
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
-        # Get RoBERTa outputs
+        # Get RoBERTa outputs with memory optimization options
         outputs = self.roberta(
             input_ids,
             attention_mask=attention_mask,
@@ -96,12 +96,16 @@ class RobertaForSelfDisclosureDetection(RobertaPreTrainedModel):
             loss_fct = nn.CrossEntropyLoss()
             # Only keep active parts of the loss
             if attention_mask is not None:
+                # More efficient masking with vectorized operations
                 active_loss = attention_mask.view(-1) == 1
-                active_logits = logits.view(-1, self.num_labels)
-                active_labels = torch.where(
-                    active_loss, labels.view(-1), torch.tensor(loss_fct.ignore_index).type_as(labels)
-                )
-                loss = loss_fct(active_logits, active_labels)
+                active_logits = logits.view(-1, self.num_labels)[active_loss]
+                active_labels = labels.view(-1)[active_loss]
+                
+                # Skip computation if no active labels
+                if active_labels.numel() > 0:
+                    loss = loss_fct(active_logits, active_labels)
+                else:
+                    loss = torch.tensor(0.0, device=logits.device, requires_grad=True)
             else:
                 loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
         
@@ -110,11 +114,11 @@ class RobertaForSelfDisclosureDetection(RobertaPreTrainedModel):
             return ((loss,) + output) if loss is not None else output
         
         return TokenClassifierOutput(
-            loss=loss,
-            logits=logits,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+                    loss=loss,
+                    logits=logits,
+                    hidden_states=outputs.hidden_states,
+                    attentions=outputs.attentions,
+            )
 
 def create_model_config(
     model_name_or_path: str = "roberta-large",
@@ -145,7 +149,7 @@ def create_model_config(
     if label_list is not None:
         num_labels = len(label_list)
     
-    # Load config
+    # Load config with performance optimizations
     config = RobertaConfig.from_pretrained(
         model_name_or_path,
         num_labels=num_labels,
@@ -155,7 +159,10 @@ def create_model_config(
         attention_probs_dropout_prob=attention_probs_dropout_prob,
         classifier_dropout=classifier_dropout,
         cache_dir=cache_dir,
-        local_files_only=local_files_only
+        local_files_only=local_files_only,
+        # Additional optimization settings
+        gradient_checkpointing=True,  # Default to gradient checkpointing
+        use_cache=False  # Disable KV caching during training
     )
     
     return config

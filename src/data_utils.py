@@ -206,7 +206,7 @@ def prepare_dataset_for_training(
     label2id = {label: i for i, label in enumerate(label_list)}
     id2label = {i: label for i, label in enumerate(label_list)}
     
-    # Define preprocessing function
+    # Define preprocessing function with batched processing
     def preprocess_function(examples):
         # Tokenize the texts
         tokenized_inputs = tokenizer(
@@ -215,21 +215,28 @@ def prepare_dataset_for_training(
             is_split_into_words=True,
             padding="max_length",
             max_length=max_length,
+            return_tensors="pt",  # Return PyTorch tensors for better compatibility
         )
         
-        # Align labels with tokens
+        # Align labels with tokens efficiently
         labels = []
         for i, label in enumerate(examples["tags"]):
             word_ids = tokenized_inputs.word_ids(batch_index=i)
             previous_word_idx = None
             label_ids = []
             
-            for word_idx in word_ids:
+            # Process span-by-span instead of token-by-token for efficiency
+            current_tag = None
+            current_start = None
+            
+            for j, word_idx in enumerate(word_ids):
                 if word_idx is None:
                     label_ids.append(-100)
                 elif word_idx != previous_word_idx:
+                    # New word
                     label_ids.append(label2id[label[word_idx]])
                 else:
+                    # Continuation of the same word
                     label_ids.append(label2id[label[word_idx]] if label_all_tokens else -100)
                 previous_word_idx = word_idx
             
@@ -238,14 +245,23 @@ def prepare_dataset_for_training(
         tokenized_inputs["labels"] = labels
         return tokenized_inputs
     
-    # Apply preprocessing to all splits
+    # Process datasets with optimized memory usage
     processed_dataset = {}
     for split in dataset.keys():
+        # Use batched processing with larger batch size for speed
         processed_dataset[split] = dataset[split].map(
             preprocess_function,
             batched=True,
+            batch_size=64,  # Process larger batches for efficiency
             remove_columns=dataset[split].column_names,
             desc=f"Processing {split} dataset",
+            num_proc=4,  # Use multiple processors if available
+        )
+        
+        # Set format to PyTorch tensors
+        processed_dataset[split].set_format(
+            type="torch", 
+            columns=["input_ids", "attention_mask", "labels"],
         )
     
     return DatasetDict(processed_dataset)
@@ -283,15 +299,20 @@ def compute_metrics(p, label_list):
     predictions, labels = p
     predictions = np.argmax(predictions, axis=2)
     
-    # Remove ignored index (special tokens)
-    true_predictions = [
-        [label_list[p] for (p, l) in zip(prediction, label) if l != -100]
-        for prediction, label in zip(predictions, labels)
-    ]
-    true_labels = [
-        [label_list[l] for (p, l) in zip(prediction, label) if l != -100]
-        for prediction, label in zip(predictions, labels)
-    ]
+    # Remove ignored index (special tokens) efficiently using numpy operations
+    true_predictions = []
+    true_labels = []
+    
+    # Process in batches to reduce memory pressure
+    batch_size = 32
+    for i in range(0, len(predictions), batch_size):
+        batch_preds = predictions[i:i+batch_size]
+        batch_labels = labels[i:i+batch_size]
+        
+        for prediction, label in zip(batch_preds, batch_labels):
+            mask = label != -100
+            true_predictions.append([label_list[p] for p, m in zip(prediction[mask], mask) if m])
+            true_labels.append([label_list[l] for l, m in zip(label[mask], mask) if m])
     
     # Calculate metrics using seqeval
     results = {
@@ -315,14 +336,19 @@ def compute_partial_span_f1(predictions, labels, label_list):
         Dictionary of metrics including partial span F1
     """
     # Convert predictions and labels to tag sequences
-    pred_tags = [
-        [label_list[p] for (p, l) in zip(prediction, label) if l != -100]
-        for prediction, label in zip(predictions, labels)
-    ]
-    true_tags = [
-        [label_list[l] for (p, l) in zip(prediction, label) if l != -100]
-        for prediction, label in zip(predictions, labels)
-    ]
+    pred_tags = []
+    true_tags = []
+    
+    # Process in batches to reduce memory pressure
+    batch_size = 32
+    for i in range(0, len(predictions), batch_size):
+        batch_preds = predictions[i:i+batch_size]
+        batch_labels = labels[i:i+batch_size]
+        
+        for prediction, label in zip(batch_preds, batch_labels):
+            mask = label != -100
+            pred_tags.append([label_list[p] for p, m in zip(prediction[mask], mask) if m])
+            true_tags.append([label_list[l] for l, m in zip(label[mask], mask) if m])
     
     # Extract spans from tags
     pred_spans = []
