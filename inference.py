@@ -59,6 +59,32 @@ def parse_args():
         default=-1,
         help="Device to run inference on (-1 for CPU, 0+ for GPU)",
     )
+    parser.add_argument(
+        "--model_type", 
+        default="roberta", 
+        type=str,
+        help="Model type selected in the list: roberta, neobert",
+    )
+    parser.add_argument(
+        "--neobert_attention_heads", 
+        default=8, 
+        type=int
+    )
+    parser.add_argument(
+        "--hidden_dropout_prob", 
+        default=0.1, 
+        type=float
+    )
+    parser.add_argument(
+        "--attention_probs_dropout_prob", 
+        default=0.1, 
+        type=float
+    )
+    parser.add_argument(
+        "--classifier_dropout", 
+        default=None, 
+        type=float
+    )
     
     args = parser.parse_args()
     return args

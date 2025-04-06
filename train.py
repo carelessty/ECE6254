@@ -161,7 +161,34 @@ def parse_args():
         type=int,
         default=100,
         help="Log every X steps",
+    )    
+    parser.add_argument(
+        "--model_type", 
+        default="roberta", 
+        type=str,
+        help="Model type selected in the list: roberta, neobert",
     )
+    parser.add_argument(
+        "--neobert_attention_heads", 
+        default=8, 
+        type=int
+    )
+    parser.add_argument(
+        "--hidden_dropout_prob", 
+        default=0.1, 
+        type=float
+    )
+    parser.add_argument(
+        "--attention_probs_dropout_prob", 
+        default=0.1, 
+        type=float
+    )
+    parser.add_argument(
+        "--classifier_dropout", 
+        default=None, 
+        type=float
+    )
+    
     
     args = parser.parse_args()
     return args
@@ -221,12 +248,23 @@ def main():
     
     # Load model and tokenizer
     logger.info(f"Loading model and tokenizer from {args.model_name_or_path}...")
-    model, tokenizer = get_model_and_tokenizer(
-        model_name_or_path=args.model_name_or_path,
-        num_labels=num_labels,
-        label_list=label_list,
-        cache_dir=args.cache_dir,
-    )
+    if args.model_type.lower() == "neobert":
+        from neobert_utils import load_neobert_model
+        # 使用 NeoBERT 加载函数加载模型
+        model = load_neobert_model(args, num_labels, label_list)
+        # 对于分词器，可以直接从预训练路径加载（或者你也可以在 neobert_utils 中封装）
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, cache_dir=args.cache_dir)
+    else:
+        # 默认使用 Roberta 模型加载函数
+        from src.model_utils import get_model_and_tokenizer
+        model, tokenizer = get_model_and_tokenizer(
+            model_name_or_path=args.model_name_or_path,
+            num_labels=num_labels,
+            label_list=label_list,
+            cache_dir=args.cache_dir,
+        )
+
     
     # Enable gradient checkpointing if specified
     if args.gradient_checkpointing:
@@ -275,7 +313,7 @@ def main():
         fp16=args.fp16,
         bf16=args.bf16,
         save_strategy="steps",
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         load_best_model_at_end=True,
         metric_for_best_model="f1",
         greater_is_better=True,
