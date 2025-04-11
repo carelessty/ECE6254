@@ -207,26 +207,38 @@ def main():
         )
     else:
         logger.info("Loading dataset from Hugging Face...")
+        # Load the dataset. Splitting now happens inside this function.
         dataset = load_reddit_self_disclosure_dataset(
             token=args.hf_token,
-            cache_dir=args.cache_dir
+            cache_dir=args.cache_dir,
+            # Optionally pass a directory to save the *raw* downloaded data
+            data_dir=os.path.join(args.output_dir, "raw_downloaded") if args.output_dir else None 
         )
+        logger.info(f"Dataset loaded and split. Splits: {list(dataset.keys())}")
         
-        # Check if dataset has only a train split
-        if list(dataset.keys()) == ["train"]:
-            logger.info("Dataset has only a train split. Creating validation and test splits...")
-            dataset = split_dataset(
-                dataset["train"],
-                train_split=args.train_split,
-                val_split=args.val_split,
-                seed=args.seed
-            )
+        # The split_dataset call is no longer needed here as it's done internally
+        # # Check if dataset has only a train split
+        # if list(dataset.keys()) == ["train"]:
+        #     logger.info("Dataset has only a train split. Creating validation and test splits...")
+        #     dataset = split_dataset(
+        #         dataset["train"],
+        #         train_split=args.train_split,
+        #         val_split=args.val_split,
+        #         seed=args.seed
+        #     )
         
-        # Save dataset to disk
-        logger.info(f"Saving dataset to {args.output_dir}...")
-        dataset.save_to_disk(os.path.join(args.output_dir, "processed_dataset"))
+        # Save the processed and split dataset to disk
+        # It seems this script might be intended to save the *preprocessed* (tokenized) data?
+        # Currently, it saves the data *before* tokenization. 
+        # If the goal is to save the tokenized data, we need to add the call to 
+        # prepare_dataset_for_training here.
+        # For now, just save the result of load_reddit_self_disclosure_dataset.
+        processed_save_path = os.path.join(args.output_dir, "processed_splits")
+        logger.info(f"Saving processed dataset splits to {processed_save_path}...")
+        os.makedirs(processed_save_path, exist_ok=True)
+        dataset.save_to_disk(processed_save_path)
     
-    # Analyze dataset
+    # Analyze dataset (this should analyze the loaded/split dataset)
     analyze_dataset(dataset)
     
     logger.info("Done!")

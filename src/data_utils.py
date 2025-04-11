@@ -16,32 +16,50 @@ from seqeval.metrics import f1_score, precision_score, recall_score
 
 logger = logging.getLogger(__name__)
 
-def parse_text_to_tokens_and_tags(example: Dict) -> Dict:
+def _process_raw_text_split(raw_text_lines: List[str]) -> List[Dict[str, List[str]]]:
     """
-    Parse a CoNLL-style text string into tokens and tags.
+    Processes raw CoNLL lines for a split into examples based on separators.
 
     Args:
-        example: A dictionary with a 'text' field.
+        raw_text_lines: A list of strings, where each string is a line from the CoNLL file.
 
     Returns:
-        A dictionary with 'tokens' and 'tags' lists.
+        A list of dictionaries, where each dictionary represents an example
+        (sentence/document) with 'tokens' and 'tags' keys.
     """
-    tokens = []
-    tags = []
+    examples = []
+    current_tokens = []
+    current_tags = []
 
-    for line in example["text"].splitlines():
+    for line in raw_text_lines:
         line = line.strip()
-        if not line or line == "[SEP]" or ".txt" in line:
+        # Ignore document markers for now, they don't separate examples in this context
+        if ".txt" in line:
             continue
-        parts = line.rsplit(" ", 1)
-        if len(parts) == 2:
-            token, tag = parts
+        # [SEP] or empty line acts as a separator between examples
+        elif not line or line == "[SEP]":
+            if current_tokens:  # Ensure we don't add empty examples
+                examples.append({"tokens": list(current_tokens), "tags": list(current_tags)})
+                current_tokens = []
+                current_tags = []
+        # Process lines with token and tag
         else:
-            token, tag = parts[0], "O"
-        tokens.append(token)
-        tags.append(tag)
+            parts = line.rsplit(" ", 1)
+            if len(parts) == 2:
+                token, tag = parts
+            else:
+                # Handle potential missing tags, default to 'O'
+                token, tag = parts[0], "O"
+                # Log a warning if a tag is missing
+                # logger.warning(f"Line missing tag, defaulting to 'O': {line}") # Optional: uncomment for debugging
+            current_tokens.append(token)
+            current_tags.append(tag)
 
-    return {"tokens": tokens, "tags": tags}
+    # Add the last example if the file doesn't end with a separator
+    if current_tokens:
+        examples.append({"tokens": list(current_tokens), "tags": list(current_tags)})
+
+    return examples
 
 def load_reddit_self_disclosure_dataset(
     token: Optional[str] = None,
@@ -49,32 +67,102 @@ def load_reddit_self_disclosure_dataset(
     data_dir: Optional[str] = None
 ) -> DatasetDict:
     """
-    Load the Reddit self-disclosure dataset from Hugging Face or local directory.
+    Load the Reddit self-disclosure dataset from Hugging Face or local directory,
+    correctly parsing examples based on separators.
     
     Args:
-        token: Hugging Face token for accessing the dataset
-        cache_dir: Directory to cache the dataset
-        data_dir: Directory containing locally saved dataset
+        token: Hugging Face token for accessing the dataset.
+        cache_dir: Directory to cache the dataset.
+        data_dir: Directory containing locally saved dataset.
         
     Returns:
-        DatasetDict containing dataset splits
+        DatasetDict containing dataset splits with correctly parsed examples.
     """
     try:
+        raw_dataset: Optional[DatasetDict] = None
         # First try to load from local directory if specified
         if data_dir and os.path.exists(data_dir):
             logger.info(f"Loading dataset from local directory: {data_dir}")
-            return DatasetDict.load_from_disk(data_dir)
+            # Assuming local data is already processed or needs similar raw loading
+            # For simplicity, let's assume it needs the same processing for now.
+            # If the saved format is different, this part needs adjustment.
+            # We might need a flag or check to see if it's already processed.
+            # Let's load it as raw text first.
+            # This assumes the local format is loadable by `load_dataset` directly
+            # e.g., saved using dataset.save_to_disk() with the raw text format.
+            # If saved AFTER the incorrect processing, it needs to be regenerated.
+            # For now, let's prioritize the Hugging Face loading logic.
+            # If loading from disk, we might need to adapt the processing.
+            # Reverting to HF load if local load doesn't work as expected for raw text.
+            try:
+                 # Attempt to load assuming it contains raw 'text' column
+                 raw_dataset = DatasetDict.load_from_disk(data_dir)
+                 if "text" not in raw_dataset[list(raw_dataset.keys())[0]].column_names:
+                      logger.warning(f"Loaded local dataset from {data_dir} does not contain 'text' column. Falling back to Hugging Face.")
+                      raw_dataset = None # Force reload from HF
+            except Exception as load_err:
+                 logger.warning(f"Could not load raw dataset from {data_dir}: {load_err}. Falling back to Hugging Face.")
+                 raw_dataset = None
+
+
+        # Load from Hugging Face if not loaded locally
+        if raw_dataset is None:
+             logger.info("Loading raw dataset from Hugging Face Hub (douy/reddit-self-disclosure)")
+             raw_dataset = load_dataset(
+                 "douy/reddit-self-disclosure",
+                 token=token, # Pass token if provided
+                 cache_dir=cache_dir
+             )
+             if data_dir: # If a data_dir was specified, save the raw dataset there
+                 logger.info(f"Saving raw dataset to {data_dir}")
+                 # Ensure parent directories exist
+                 os.makedirs(data_dir, exist_ok=True)
+                 raw_dataset.save_to_disk(data_dir)
+
+
+        # Process each split
+        processed_splits = {}
+        logger.info("Processing raw dataset splits into examples...")
+        if len(raw_dataset.keys()) > 1:
+            logger.warning(f"Raw dataset has multiple splits: {list(raw_dataset.keys())}. Processing each separately, but splitting logic assumes a single 'train' split as source.")
         
-        # Otherwise load from Hugging Face
-        logger.info("Loading dataset from Hugging Face")
-        dataset = load_dataset(
-            "douy/reddit-self-disclosure",
-            cache_dir=cache_dir
+        # Assume the primary data is in the 'train' split of the raw dataset
+        # or the first split if 'train' is not present
+        source_split_name = 'train' if 'train' in raw_dataset else list(raw_dataset.keys())[0]
+        if source_split_name not in raw_dataset:
+             raise ValueError(f"Cannot find a source split ('{source_split_name}' or first available) in the raw dataset.")
+
+        logger.info(f"Using raw split '{source_split_name}' as the source for processing.")
+        source_split_data = raw_dataset[source_split_name]
+        
+        # Combine all text lines for the split.
+        all_lines = "\n".join(source_split_data["text"]).splitlines()
+        # Process the combined lines to get correctly structured examples
+        processed_examples = _process_raw_text_split(all_lines)
+        
+        # Create a single Dataset from the list of processed examples
+        processed_dataset = Dataset.from_dict(
+            {"tokens": [ex["tokens"] for ex in processed_examples],
+             "tags": [ex["tags"] for ex in processed_examples]}
         )
-        dataset = dataset.map(parse_text_to_tokens_and_tags, remove_columns=["text"])
-        return dataset
+        logger.info(f"Processed source split '{source_split_name}': {len(processed_dataset)} examples.")
+
+        # Now, split the processed dataset into train, validation, and test sets
+        logger.info("Splitting the processed dataset into train, validation, and test sets...")
+        final_dataset_splits = split_dataset(
+            dataset=processed_dataset,
+            # Using default splits: 80% train, 10% validation, 10% test
+            # train_split=0.8, 
+            # val_split=0.1,
+            # seed=42 # split_dataset uses seed=42 by default
+        )
+        logger.info(f"Splitting complete. Train: {len(final_dataset_splits['train'])}, Validation: {len(final_dataset_splits['validation'])}, Test: {len(final_dataset_splits['test'])} examples.")
+
+        # Return the DatasetDict with train, validation, test splits
+        return final_dataset_splits
+
     except Exception as e:
-        logger.error(f"Error loading dataset: {e}")
+        logger.error(f"Error loading and processing dataset: {e}", exc_info=True) # Add traceback info
         raise
 
 def split_dataset(
@@ -299,26 +387,27 @@ def compute_metrics(p, label_list):
     predictions, labels = p
     predictions = np.argmax(predictions, axis=2)
     
-    # Remove ignored index (special tokens) efficiently using numpy operations
+    # Remove ignored index (special tokens) and convert to label strings
     true_predictions = []
     true_labels = []
     
-    # Process in batches to reduce memory pressure
-    batch_size = 32
-    for i in range(0, len(predictions), batch_size):
-        batch_preds = predictions[i:i+batch_size]
-        batch_labels = labels[i:i+batch_size]
-        
-        for prediction, label in zip(batch_preds, batch_labels):
-            mask = label != -100
-            true_predictions.append([label_list[p] for p, m in zip(prediction[mask], mask) if m])
-            true_labels.append([label_list[l] for l, m in zip(label[mask], mask) if m])
+    for i in range(len(predictions)):
+        prediction = predictions[i]
+        label = labels[i]
+        true_prediction_sequence = []
+        true_label_sequence = []
+        for pred_id, label_id in zip(prediction, label):
+            if label_id != -100: # Only consider active labels
+                true_prediction_sequence.append(label_list[pred_id])
+                true_label_sequence.append(label_list[label_id])
+        true_predictions.append(true_prediction_sequence)
+        true_labels.append(true_label_sequence)
     
     # Calculate metrics using seqeval
     results = {
-        "precision": precision_score(true_labels, true_predictions),
-        "recall": recall_score(true_labels, true_predictions),
-        "f1": f1_score(true_labels, true_predictions),
+        "precision": precision_score(true_labels, true_predictions, zero_division=0),
+        "recall": recall_score(true_labels, true_predictions, zero_division=0),
+        "f1": f1_score(true_labels, true_predictions, zero_division=0),
     }
     
     return results
@@ -328,27 +417,32 @@ def compute_partial_span_f1(predictions, labels, label_list):
     Compute partial span F1 score as described in the paper.
     
     Args:
-        predictions: Model predictions
+        predictions: Model predictions (logits or argmaxed IDs)
         labels: True labels
         label_list: List of possible labels
         
     Returns:
         Dictionary of metrics including partial span F1
     """
-    # Convert predictions and labels to tag sequences
+    # Ensure predictions are class IDs
+    if predictions.ndim == 3: # Check if predictions are logits
+        predictions = np.argmax(predictions, axis=2)
+        
+    # Convert predictions and labels to tag sequences, ignoring -100
     pred_tags = []
     true_tags = []
     
-    # Process in batches to reduce memory pressure
-    batch_size = 32
-    for i in range(0, len(predictions), batch_size):
-        batch_preds = predictions[i:i+batch_size]
-        batch_labels = labels[i:i+batch_size]
-        
-        for prediction, label in zip(batch_preds, batch_labels):
-            mask = label != -100
-            pred_tags.append([label_list[p] for p, m in zip(prediction[mask], mask) if m])
-            true_tags.append([label_list[l] for l, m in zip(label[mask], mask) if m])
+    for i in range(len(predictions)):
+        prediction = predictions[i]
+        label = labels[i]
+        pred_tag_sequence = []
+        true_tag_sequence = []
+        for pred_id, label_id in zip(prediction, label):
+            if label_id != -100: # Only consider active labels
+                pred_tag_sequence.append(label_list[pred_id])
+                true_tag_sequence.append(label_list[label_id])
+        pred_tags.append(pred_tag_sequence)
+        true_tags.append(true_tag_sequence)
     
     # Extract spans from tags
     pred_spans = []
@@ -367,28 +461,32 @@ def compute_partial_span_f1(predictions, labels, label_list):
     fn = 0
     
     for pred_spans_sent, true_spans_sent in zip(pred_spans, true_spans):
+        # Track matched true spans to avoid double counting for FN calculation
+        matched_true_spans = set()
         for pred_span in pred_spans_sent:
-            matched = False
-            for true_span in true_spans_sent:
+            matched_this_pred = False # Track if this specific predicted span found any match
+            for idx, true_span in enumerate(true_spans_sent):
                 if spans_overlap(pred_span, true_span, threshold=0.5):
+                    # Found an overlap! Increment TP for this predicted span.
                     tp += 1
-                    matched = True
+                    # Mark the corresponding true span as matched (used for FN calculation).
+                    matched_true_spans.add(idx)
+                    # Mark that this predicted span found a match.
+                    matched_this_pred = True
+                    # A predicted span counts as one TP even if it overlaps multiple ground truths.
+                    # Break after finding the first match for this predicted span.
                     break
-            if not matched:
+            if not matched_this_pred:
+                # This predicted span did not overlap sufficiently with ANY true span.
                 fp += 1
         
-        for true_span in true_spans_sent:
-            matched = False
-            for pred_span in pred_spans_sent:
-                if spans_overlap(true_span, pred_span, threshold=0.5):
-                    matched = True
-                    break
-            if not matched:
-                fn += 1
+        # Calculate false negatives: True spans that were not matched by any prediction span.
+        fn += len(true_spans_sent) - len(matched_true_spans)
     
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+    # Added checks for division by zero
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
     
     return {
         "partial_span_precision": precision,

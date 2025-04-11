@@ -18,6 +18,8 @@ from transformers import (
     set_seed,
     TrainerCallback,
 )
+# Import seqeval scoring functions directly for use in compute_metrics_fn
+from seqeval.metrics import precision_score, recall_score, f1_score
 
 from src.data_utils import (
     load_reddit_self_disclosure_dataset,
@@ -25,7 +27,6 @@ from src.data_utils import (
     get_labels,
     compute_metrics,
     compute_partial_span_f1,
-    split_dataset
 )
 from src.model_utils import get_model_and_tokenizer, get_training_args
 
@@ -218,28 +219,12 @@ def main():
     
     # Load dataset
     logger.info("Loading dataset...")
-    
-    # Try to load from preprocessed data directory first
-    if args.data_dir and os.path.exists(os.path.join(args.data_dir, "processed_dataset")):
-        logger.info(f"Loading preprocessed dataset from {args.data_dir}/processed_dataset")
-        dataset = load_from_disk(os.path.join(args.data_dir, "processed_dataset"))
-    else:
-        # Otherwise load from Hugging Face or original dataset directory
-        dataset = load_reddit_self_disclosure_dataset(
-            token=args.hf_token, 
-            cache_dir=args.cache_dir,
-            data_dir=os.path.join(args.data_dir, "original_dataset") if args.data_dir else None
-        )
-        
-        # Check if dataset has only a train split
-        if list(dataset.keys()) == ["train"]:
-            logger.info("Dataset has only a train split. Creating validation and test splits...")
-            dataset = split_dataset(
-                dataset["train"],
-                train_split=args.train_split,
-                val_split=args.val_split,
-                seed=args.seed
-            )
+    dataset = load_reddit_self_disclosure_dataset(
+        token=args.hf_token,
+        cache_dir=args.cache_dir,
+        data_dir=args.data_dir
+    )
+    logger.info(f"Dataset loaded. Splits: {list(dataset.keys())}")
     
     # Get label list
     label_list = get_labels(dataset["train"])
@@ -278,7 +263,7 @@ def main():
         r=16,                 # Increased rank for better expressivity
         lora_alpha=32,
         lora_dropout=0.1,
-        target_modules=["query", "key", "value"],  # Target specific modules for efficiency
+        target_modules=["query", "key", "value", "dense"],  # Target specific modules for efficiency
     )
 
     # Apply LoRA to model
@@ -300,7 +285,65 @@ def main():
     logger.info(f"Validation dataset size: {len(processed_dataset['validation'])}")
     logger.info(f"Test dataset size: {len(processed_dataset['test'])}")
     
-    # Configure training arguments
+    # --- Undersample 'O'-only sentences in the training set --- 
+    logger.info("Analyzing training set for undersampling...")
+    train_dataset = processed_dataset["train"]
+    entity_indices = []
+    only_O_indices = []
+
+    # Import random here, only needed if undersampling occurs
+    import random 
+    
+    for i, example in enumerate(train_dataset):
+        has_entity = False
+        # Check labels, ignore padding -100
+        for label_id in example['labels']:
+            if label_id != -100:
+                # Use label_list which should be available in this scope
+                label_str = label_list[label_id] 
+                if label_str != 'O':
+                    has_entity = True
+                    break
+        if has_entity:
+            entity_indices.append(i)
+        else:
+            # Only append if it's not padding-only (though unlikely after processing)
+            if any(l != -100 for l in example['labels']):
+                 only_O_indices.append(i)
+    
+    n_entity = len(entity_indices)
+    n_only_O = len(only_O_indices)
+    logger.info(f"Found {n_entity} sentences with entities and {n_only_O} sentences with only 'O'.")
+
+    # Assign the dataset to be used for training
+    training_dataset_to_use = train_dataset # Default to original
+
+    if n_only_O > n_entity and n_entity > 0: # Only undersample if O-only is majority and entities exist
+        logger.info(f"Undersampling 'O'-only sentences from {n_only_O} down to {n_entity}.")
+        # Randomly select n_entity indices from the only_O_indices
+        random.seed(args.seed) # Ensure reproducibility
+        sampled_O_indices = random.sample(only_O_indices, n_entity)
+        
+        # Combine indices and select the balanced dataset
+        balanced_indices = entity_indices + sampled_O_indices
+        balanced_train_dataset = train_dataset.select(balanced_indices)
+        
+        # Shuffle the balanced dataset
+        balanced_train_dataset = balanced_train_dataset.shuffle(seed=args.seed)
+        logger.info(f"Created balanced training dataset with {len(balanced_train_dataset)} examples.")
+        training_dataset_to_use = balanced_train_dataset # Use the balanced one
+
+    elif n_entity == 0:
+        logger.warning("No sentences with entities found in the training set. Cannot balance. Using original training set.")
+        # training_dataset_to_use remains train_dataset
+    else:
+        logger.info("No undersampling needed (O-only sentences are not the majority or no entities found). Using original training set.")
+        # training_dataset_to_use remains train_dataset
+
+    # ----------------------------------------------------------
+    
+    # Configure training arguments AFTER dataset preparation/undersampling
+    logger.info("Configuring training arguments...")
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
@@ -340,15 +383,7 @@ def main():
         eval_accumulation_steps=8,  # Accumulate gradients during eval to reduce memory
         # Set eval batch size reduction to use less memory during evaluation
     )
-    
-    # Function to free up memory after evaluation
-    def cleanup_memory():
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-        import gc
-        gc.collect()
-    
+
     # Create a smaller validation dataset if the evaluation set is too large
     # This helps prevent OOM during validation
     eval_dataset = processed_dataset["validation"]
@@ -365,41 +400,86 @@ def main():
     else:
         validation_subset = eval_dataset
     
-    # Modified compute_metrics to be more memory-efficient
+    # Define compute_metrics_fn and helper functions BEFORE Trainer initialization
+    def cleanup_memory():
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        import gc
+        gc.collect()
+
     def compute_metrics_fn(eval_preds):
+        logger.info("--- Inside compute_metrics_fn ---") # DEBUG PRINT
         preds, labels = eval_preds
-        # Process predictions in smaller chunks to avoid OOM
-        chunk_size = 32
-        metrics_list = []
+        logger.info(f"Raw preds shape: {preds.shape}, type: {preds.dtype}") # DEBUG PRINT
+        logger.info(f"Raw labels shape: {labels.shape}, type: {labels.dtype}") # DEBUG PRINT
+
+        # Get predicted IDs
+        preds_ids = np.argmax(preds, axis=2)
+        logger.info(f"Argmaxed preds_ids shape: {preds_ids.shape}") # DEBUG PRINT
+
+        # Convert to label sequences, ignoring -100
+        true_predictions_list = []
+        true_labels_list = []
+        for i in range(len(preds_ids)):
+            prediction = preds_ids[i]
+            label = labels[i]
+            true_prediction_sequence = []
+            true_label_sequence = []
+            for pred_id, label_id in zip(prediction, label):
+                if label_id != -100:
+                    true_prediction_sequence.append(label_list[pred_id])
+                    true_label_sequence.append(label_list[label_id])
+            true_predictions_list.append(true_prediction_sequence)
+            true_labels_list.append(true_label_sequence)
+
+        # DEBUG PRINT: Print first example's labels and predictions
+        if len(true_labels_list) > 0 and len(true_predictions_list) > 0:
+            logger.info(f"Sample True Labels (first example, len={len(true_labels_list[0])}): {true_labels_list[0][:50]}...")
+            logger.info(f"Sample Pred Labels (first example, len={len(true_predictions_list[0])}): {true_predictions_list[0][:50]}...")
+            is_pred_all_O = all(p == 'O' for p in true_predictions_list[0])
+            num_non_O_true = sum(t != 'O' for t in true_labels_list[0]) # Added count
+            num_non_O_pred = sum(p != 'O' for p in true_predictions_list[0]) # Added count
+            logger.info(f"First sample analysis: True non-O count={num_non_O_true}, Pred non-O count={num_non_O_pred}, Is prediction all 'O'? {is_pred_all_O}")
+        else:
+            logger.warning("Could not get sample labels/predictions, lists might be empty.")
+
+        # Calculate metrics using seqeval functions
+        try:
+            precision = precision_score(true_labels_list, true_predictions_list, zero_division=0)
+            recall = recall_score(true_labels_list, true_predictions_list, zero_division=0)
+            f1 = f1_score(true_labels_list, true_predictions_list, zero_division=0)
+            logger.info(f"Seqeval results: Precision={precision:.4f}, Recall={recall:.4f}, F1={f1:.4f}") # DEBUG PRINT
+        except Exception as e:
+            logger.error(f"Error during seqeval calculation: {e}", exc_info=True)
+            precision, recall, f1 = 0.0, 0.0, 0.0
+
+        metrics = {
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+        }
+
+        # Compute partial span F1 separately
+        try:
+            partial_metrics = compute_partial_span_f1(
+                preds_ids, 
+                labels,
+                label_list
+            )
+            logger.info(f"Partial Span F1 results: {partial_metrics}") # DEBUG PRINT
+        except Exception as e:
+            logger.error(f"Error during partial span F1 calculation: {e}", exc_info=True)
+            partial_metrics = {"partial_span_precision": 0.0, "partial_span_recall": 0.0, "partial_span_f1": 0.0}
         
-        # Process in chunks
-        for i in range(0, len(preds), chunk_size):
-            chunk_preds = preds[i:i+chunk_size]
-            chunk_labels = labels[i:i+chunk_size]
-            
-            # Calculate metrics for this chunk
-            chunk_metrics = compute_metrics((chunk_preds, chunk_labels), label_list)
-            metrics_list.append(chunk_metrics)
-        
-        # Average metrics across chunks
-        metrics = {k: np.mean([m[k] for m in metrics_list]) for k in metrics_list[0].keys()}
-        
-        # Compute partial span F1 more efficiently
-        partial_metrics = compute_partial_span_f1(
-            np.argmax(preds, axis=2),
-            labels,
-            label_list
-        )
-        
-        # Combine metrics
         metrics.update(partial_metrics)
         
-        # Force garbage collection to free memory
+        logger.info("--- Exiting compute_metrics_fn ---") # DEBUG PRINT
         cleanup_memory()
         
         return metrics
     
-    # Create a custom callback to clean up memory after evaluation
+    # Define MemoryCleanupCallback BEFORE Trainer initialization
     class MemoryCleanupCallback(TrainerCallback):
         """Callback to clean up memory after evaluation."""
         
@@ -414,7 +494,6 @@ def main():
         
         def on_prediction_step(self, args, state, control, **kwargs):
             """Called after each prediction step."""
-            # Less aggressive cleanup during prediction to avoid too much overhead
             if torch.cuda.is_available() and state.global_step % 10 == 0:
                 torch.cuda.empty_cache()
             return control
@@ -427,18 +506,18 @@ def main():
             import gc
             gc.collect()
             return control
-    
-    # Initialize Trainer with memory-efficient validation
+
+    # Initialize Trainer AFTER defining args, datasets, metrics fn, callbacks
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=processed_dataset["train"],
-        eval_dataset=validation_subset,  # Use smaller validation set
+        # Use the potentially balanced training dataset
+        train_dataset=training_dataset_to_use,
+        eval_dataset=validation_subset,  # Use smaller validation set for eval
         tokenizer=tokenizer,
         compute_metrics=compute_metrics_fn,
         callbacks=[
-            # Add custom callback to clean up memory after evaluation
-            MemoryCleanupCallback()
+            MemoryCleanupCallback() # Add the callback instance
         ],
     )
     
