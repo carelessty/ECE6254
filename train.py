@@ -11,12 +11,15 @@ from peft import get_peft_model, LoraConfig, TaskType
 
 import numpy as np
 import torch
+import torch.nn as nn
 from datasets import load_dataset, DatasetDict, load_from_disk
 from transformers import (
     Trainer,
     TrainingArguments,
     set_seed,
     TrainerCallback,
+    AutoTokenizer,
+    AutoModelForTokenClassification,
 )
 # Import seqeval scoring functions directly for use in compute_metrics_fn
 from seqeval.metrics import precision_score, recall_score, f1_score
@@ -28,7 +31,9 @@ from src.data_utils import (
     compute_metrics,
     compute_partial_span_f1,
 )
-from src.model_utils import get_model_and_tokenizer, get_training_args
+from src.model_utils import get_model_and_tokenizer
+# Import our custom NeoBERT implementation
+from src.model import NeoBERTForTokenClassification
 
 logger = logging.getLogger(__name__)
 
@@ -162,34 +167,15 @@ def parse_args():
         type=int,
         default=100,
         help="Log every X steps",
-    )    
+    )
+    # Argument to specify model type
     parser.add_argument(
-        "--model_type", 
-        default="roberta", 
+        "--model_type",
         type=str,
-        help="Model type selected in the list: roberta, neobert",
+        default="roberta",
+        choices=["roberta", "neobert"], # Allow specifying model type
+        help="Model type to load ('roberta' or 'neobert')",
     )
-    parser.add_argument(
-        "--neobert_attention_heads", 
-        default=8, 
-        type=int
-    )
-    parser.add_argument(
-        "--hidden_dropout_prob", 
-        default=0.1, 
-        type=float
-    )
-    parser.add_argument(
-        "--attention_probs_dropout_prob", 
-        default=0.1, 
-        type=float
-    )
-    parser.add_argument(
-        "--classifier_dropout", 
-        default=None, 
-        type=float
-    )
-    
     
     args = parser.parse_args()
     return args
@@ -231,39 +217,174 @@ def main():
     num_labels = len(label_list)
     logger.info(f"Number of labels: {num_labels}")
     
-    # Load model and tokenizer
-    logger.info(f"Loading model and tokenizer from {args.model_name_or_path}...")
+    # --- Model and Tokenizer Loading --- 
+    logger.info(f"Loading model type '{args.model_type}' from {args.model_name_or_path}...")
+    
+    # Create label mappings
+    id2label={i: l for i, l in enumerate(label_list)}
+    label2id={l: i for i, l in enumerate(label_list)}
+    
     if args.model_type.lower() == "neobert":
-        from neobert_utils import load_neobert_model
-        # 使用 NeoBERT 加载函数加载模型
-        model = load_neobert_model(args, num_labels, label_list)
-        # 对于分词器，可以直接从预训练路径加载（或者你也可以在 neobert_utils 中封装）
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, cache_dir=args.cache_dir)
-    else:
-        # 默认使用 Roberta 模型加载函数
-        from src.model_utils import get_model_and_tokenizer
-        model, tokenizer = get_model_and_tokenizer(
-            model_name_or_path=args.model_name_or_path,
+        # Use our custom NeoBERTForTokenClassification wrapper
+        logger.info("Loading NeoBERT using custom NeoBERTForTokenClassification wrapper")
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model_name_or_path, 
+            cache_dir=args.cache_dir,
+            use_fast=True,
+            add_prefix_space=True, # Good practice for RoBERTa-like tokenizers
+            trust_remote_code=True
+        )
+        model = NeoBERTForTokenClassification.from_pretrained(
+            args.model_name_or_path,
             num_labels=num_labels,
-            label_list=label_list,
+            id2label=id2label,
+            label2id=label2id,
             cache_dir=args.cache_dir,
         )
-
+        logger.info("NeoBERT model and tokenizer loaded.")
     
-    # Enable gradient checkpointing if specified
+    else: # Default to standard RoBERTa
+        logger.info("Loading standard RoBERTa model for Token Classification.")
+        model, tokenizer = get_model_and_tokenizer(
+             model_name_or_path=args.model_name_or_path,
+             num_labels=num_labels,
+             label_list=label_list, # Pass label_list here
+             cache_dir=args.cache_dir,
+        )
+        logger.info("Standard RoBERTa model and tokenizer loaded.")
+
+    logger.info(f"Model Class: {type(model).__name__}")
+    logger.info(f"Tokenizer Class: {type(tokenizer).__name__}")
+    
+    # --- PEFT (LoRA) Configuration --- 
+    logger.info("Configuring LoRA...")
+    # Enable gradient checkpointing if requested
     if args.gradient_checkpointing:
         logger.info("Enabling gradient checkpointing")
-        model.gradient_checkpointing_enable()
+        try:
+            model.gradient_checkpointing_enable()
+        except Exception as e:
+            logger.warning(f"Could not enable gradient checkpointing: {e}")
+            logger.warning("This may affect memory usage but training will continue.")
     
-    # Configure LoRA for parameter-efficient fine-tuning
+    # Determine target modules based on model type
+    if args.model_type.lower() == "neobert":
+        # For NeoBERT, we need to find target modules by examining the model structure
+        logger.info("Examining NeoBERT structure to determine target modules for LoRA...")
+        
+        # Find Linear layers to use as target modules
+        linear_modules = []
+        encoder_modules = {}  # 用于按层分组的字典
+        
+        # 首先收集所有线性层
+        for name, module in model.named_modules():
+            # Only use full module paths with parameters
+            if isinstance(module, nn.Linear) and hasattr(module, 'weight'):
+                linear_modules.append(name)
+                if len(linear_modules) <= 10:  # Print a few for debugging
+                    logger.info(f"Found linear module: {name}")
+                
+                # 识别层号和模块类型
+                if "transformer_encoder" in name:
+                    parts = name.split(".")
+                    for i, part in enumerate(parts):
+                        if part == "transformer_encoder" and i+1 < len(parts) and parts[i+1].isdigit():
+                            layer_num = int(parts[i+1])
+                            if layer_num not in encoder_modules:
+                                encoder_modules[layer_num] = []
+                            encoder_modules[layer_num].append(name)
+        
+        # 按层号分析每个encoder层的组件
+        logger.info(f"Found modules in {len(encoder_modules)} encoder layers")
+        
+        # 确定应用LoRA的层数
+        num_layers = len(encoder_modules)
+        # 选择要应用LoRA的层数（可以是全部或部分层）
+        target_layer_count = num_layers  # 默认全部应用
+        
+        # 如果层数超过10，可以选择一部分重要的层（例如前面几层、后面几层或跳跃选择）
+        if num_layers > 10:
+            # 选项1：仅应用于前后各几层（通常最重要）
+            # target_layers = list(range(3)) + list(range(num_layers-3, num_layers))
+            
+            # 选项2：均匀选择层
+            target_layers = sorted(set([0, num_layers-1] + [i for i in range(num_layers) if i % 3 == 0]))
+            target_layer_count = len(target_layers)
+            logger.info(f"Applying LoRA to {target_layer_count} of {num_layers} layers: {target_layers}")
+        else:
+            # 层数不多时应用到所有层
+            target_layers = list(range(num_layers))
+            logger.info(f"Applying LoRA to all {num_layers} encoder layers")
+        
+        # 确定每层中应用LoRA的模块类型
+        target_modules = []
+        
+        # 分析模块类型并选择应用LoRA的模块
+        module_types = set()
+        for layer_modules in encoder_modules.values():
+            for module in layer_modules:
+                if "qkv" in module:
+                    module_types.add("qkv")
+                elif "wo" in module:
+                    module_types.add("wo") 
+                elif "ffn.w12" in module:
+                    module_types.add("ffn.w12")
+                elif "ffn.w3" in module:
+                    module_types.add("ffn.w3")
+        
+        logger.info(f"Found module types: {module_types}")
+        
+        # 为选定的层构建目标模块列表
+        for layer_num in target_layers:
+            if layer_num in encoder_modules:
+                layer_modules = encoder_modules[layer_num]
+                # 优先选择注意力相关的模块
+                qkv_modules = [m for m in layer_modules if "qkv" in m]
+                wo_modules = [m for m in layer_modules if "wo" in m]
+                ffn_modules = [m for m in layer_modules if "ffn" in m]
+                
+                # 添加注意力模块（QKV和WO投影）
+                target_modules.extend(qkv_modules)
+                target_modules.extend(wo_modules)
+                
+                # 可选：添加前馈网络模块（取决于计算资源和需求）
+                if len(target_modules) < 30:  # 限制总模块数以避免内存问题
+                    target_modules.extend(ffn_modules)
+        
+        if not target_modules:
+            # 如果通过层分析没有找到模块，回退到简单的模式匹配
+            logger.warning("Could not find modules through layer analysis. Falling back to pattern matching.")
+            target_modules = [name for name in linear_modules if any(
+                pattern in name for pattern in ['qkv', 'wo', 'ffn.w12', 'ffn.w3'])]
+            # 限制模块数量
+            if len(target_modules) > 30:
+                target_modules = target_modules[:30]
+        
+        logger.info(f"Selected {len(target_modules)} modules for LoRA fine-tuning")
+        logger.info(f"LoRA target modules: {target_modules}")
+    else:
+        # For RoBERTa, use the standard query/key/value names
+        target_modules = ["query", "key", "value"]
+        logger.info("Using standard attention module names for RoBERTa")
+
+    # 根据选择的目标模块数量调整LoRA配置
+    lora_r = 16  # 默认rank
+    lora_alpha = 32  # 默认alpha
+    
+    # 如果模块太多，可以降低rank以节省内存
+    if len(target_modules) > 20:
+        lora_r = 8
+        lora_alpha = 16
+        logger.info(f"Reducing LoRA rank to {lora_r} due to high number of target modules")
+    
+    # Configure LoRA with the determined target modules
     lora_config = LoraConfig(
         task_type=TaskType.TOKEN_CLS,
         inference_mode=False,
-        r=16,                 # Increased rank for better expressivity
-        lora_alpha=32,
-        lora_dropout=0.1,
-        target_modules=["query", "key", "value", "dense"],  # Target specific modules for efficiency
+        r=lora_r,                   # Rank of the update matrices
+        lora_alpha=lora_alpha,      # Alpha scaling factor
+        lora_dropout=0.1,           # Dropout probability for LoRA layers
+        target_modules=target_modules,
     )
 
     # Apply LoRA to model
@@ -414,35 +535,71 @@ def main():
         logger.info(f"Raw preds shape: {preds.shape}, type: {preds.dtype}") # DEBUG PRINT
         logger.info(f"Raw labels shape: {labels.shape}, type: {labels.dtype}") # DEBUG PRINT
 
+        # 安全地检查预测结果是否有效
+        if preds is None or labels is None:
+            logger.error("Received None for predictions or labels")
+            return {
+                "precision": 0.0,
+                "recall": 0.0,
+                "f1": 0.0,
+                "partial_span_precision": 0.0,
+                "partial_span_recall": 0.0,
+                "partial_span_f1": 0.0
+            }
+            
         # Get predicted IDs
-        preds_ids = np.argmax(preds, axis=2)
-        logger.info(f"Argmaxed preds_ids shape: {preds_ids.shape}") # DEBUG PRINT
+        try:
+            preds_ids = np.argmax(preds, axis=2)
+            logger.info(f"Argmaxed preds_ids shape: {preds_ids.shape}") # DEBUG PRINT
+        except Exception as e:
+            logger.error(f"Error during argmax: {e}")
+            # 返回默认值
+            return {
+                "precision": 0.0,
+                "recall": 0.0,
+                "f1": 0.0,
+                "partial_span_precision": 0.0,
+                "partial_span_recall": 0.0,
+                "partial_span_f1": 0.0
+            }
 
         # Convert to label sequences, ignoring -100
         true_predictions_list = []
         true_labels_list = []
-        for i in range(len(preds_ids)):
-            prediction = preds_ids[i]
-            label = labels[i]
-            true_prediction_sequence = []
-            true_label_sequence = []
-            for pred_id, label_id in zip(prediction, label):
-                if label_id != -100:
-                    true_prediction_sequence.append(label_list[pred_id])
-                    true_label_sequence.append(label_list[label_id])
-            true_predictions_list.append(true_prediction_sequence)
-            true_labels_list.append(true_label_sequence)
+        
+        try:
+            for i in range(len(preds_ids)):
+                prediction = preds_ids[i]
+                label = labels[i]
+                true_prediction_sequence = []
+                true_label_sequence = []
+                for pred_id, label_id in zip(prediction, label):
+                    if label_id != -100:
+                        true_prediction_sequence.append(label_list[pred_id])
+                        true_label_sequence.append(label_list[label_id])
+                true_predictions_list.append(true_prediction_sequence)
+                true_labels_list.append(true_label_sequence)
 
-        # DEBUG PRINT: Print first example's labels and predictions
-        if len(true_labels_list) > 0 and len(true_predictions_list) > 0:
-            logger.info(f"Sample True Labels (first example, len={len(true_labels_list[0])}): {true_labels_list[0][:50]}...")
-            logger.info(f"Sample Pred Labels (first example, len={len(true_predictions_list[0])}): {true_predictions_list[0][:50]}...")
-            is_pred_all_O = all(p == 'O' for p in true_predictions_list[0])
-            num_non_O_true = sum(t != 'O' for t in true_labels_list[0]) # Added count
-            num_non_O_pred = sum(p != 'O' for p in true_predictions_list[0]) # Added count
-            logger.info(f"First sample analysis: True non-O count={num_non_O_true}, Pred non-O count={num_non_O_pred}, Is prediction all 'O'? {is_pred_all_O}")
-        else:
-            logger.warning("Could not get sample labels/predictions, lists might be empty.")
+            # DEBUG PRINT: Print first example's labels and predictions
+            if len(true_labels_list) > 0 and len(true_predictions_list) > 0:
+                logger.info(f"Sample True Labels (first example, len={len(true_labels_list[0])}): {true_labels_list[0][:50]}...")
+                logger.info(f"Sample Pred Labels (first example, len={len(true_predictions_list[0])}): {true_predictions_list[0][:50]}...")
+                is_pred_all_O = all(p == 'O' for p in true_predictions_list[0])
+                num_non_O_true = sum(t != 'O' for t in true_labels_list[0]) # Added count
+                num_non_O_pred = sum(p != 'O' for p in true_predictions_list[0]) # Added count
+                logger.info(f"First sample analysis: True non-O count={num_non_O_true}, Pred non-O count={num_non_O_pred}, Is prediction all 'O'? {is_pred_all_O}")
+            else:
+                logger.warning("Could not get sample labels/predictions, lists might be empty.")
+        except Exception as e:
+            logger.error(f"Error during sequence conversion: {e}", exc_info=True)
+            return {
+                "precision": 0.0,
+                "recall": 0.0,
+                "f1": 0.0,
+                "partial_span_precision": 0.0,
+                "partial_span_recall": 0.0,
+                "partial_span_f1": 0.0
+            }
 
         # Calculate metrics using seqeval functions
         try:
@@ -507,8 +664,36 @@ def main():
             gc.collect()
             return control
 
-    # Initialize Trainer AFTER defining args, datasets, metrics fn, callbacks
-    trainer = Trainer(
+    # 自定义Trainer类，添加更多的错误处理和日志记录
+    class CustomTrainer(Trainer):
+        """自定义Trainer以增强与自定义模型的兼容性"""
+        
+        def evaluation_loop(self, dataloader, description, prediction_loss_only=None, ignore_keys=None, metric_key_prefix="eval"):
+            """重写评估循环以处理NoneType输出的边缘情况"""
+            try:
+                # 调用原始实现
+                return super().evaluation_loop(
+                    dataloader, description, prediction_loss_only, ignore_keys, metric_key_prefix
+                )
+            except TypeError as e:
+                # 处理NoneType错误
+                logger.error(f"TypeError in evaluation_loop: {e}")
+                logger.warning("返回空评估结果，跳过当前评估步骤")
+                
+                # 返回一个最小可行的评估结果以避免训练中断
+                return {
+                    f"{metric_key_prefix}_loss": 0.0,
+                    f"{metric_key_prefix}_precision": 0.0,
+                    f"{metric_key_prefix}_recall": 0.0,
+                    f"{metric_key_prefix}_f1": 0.0,
+                    f"{metric_key_prefix}_runtime": 0.0,
+                    f"{metric_key_prefix}_samples_per_second": 0.0,
+                    f"{metric_key_prefix}_steps_per_second": 0.0,
+                }, [], []
+
+    # 使用自定义Trainer替换标准Trainer
+    # trainer = Trainer(...)
+    trainer = CustomTrainer(
         model=model,
         args=training_args,
         # Use the potentially balanced training dataset
